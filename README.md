@@ -1,5 +1,7 @@
 # telegram-android-custom-endpoint
 
+[![build-apk](https://github.com/link0ln/telegram-android-custom-endpoint/actions/workflows/build.yml/badge.svg)](https://github.com/link0ln/telegram-android-custom-endpoint/actions/workflows/build.yml)
+
 Route the official **Telegram for Android** through your own server over
 **genuine TLS**, so it survives pattern-based DPI that blocks Telegram's built-in
 Fake-TLS MTProxy.
@@ -48,6 +50,11 @@ relay only sees TLS-wrapped, already-encrypted bytes and which DC to forward to.
    (see [client/README.md](client/README.md)).
 3. Install the APK, and on first launch enter your `api_id` + `api_hash`
    (from https://my.telegram.org) and your relay's domain.
+
+**Prebuilt APK:** CI ([`.github/workflows/build.yml`](.github/workflows/build.yml))
+builds the client automatically — grab the artifact from the **Actions** tab, or a
+tagged build from **Releases** (push a `v*` tag to cut one). It's debug-signed and
+you still enter your own `api_id`/`api_hash`/endpoint on first launch.
 
 ## Status
 
