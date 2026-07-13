@@ -332,7 +332,7 @@ diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java b
 index b1caaddb..c4860c84 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
-@@ -26,8 +26,8 @@ public class BuildVars {
+@@ -26,5 +26,5 @@ public class BuildVars {
      public static boolean NO_SCOPED_STORAGE = Build.VERSION.SDK_INT <= 29;
      public static String BUILD_VERSION_STRING = BuildConfig.BUILD_VERSION_STRING;
  
@@ -340,9 +340,6 @@ index b1caaddb..c4860c84 100644
 -    public static String APP_HASH = "014b35b6184100b085b0d0572f9b5103";
 +    public static int APP_ID = 0;
 +    public static String APP_HASH = "";
- 
-     // SafetyNet key for Google Identity SDK, set it to empty to disable
-     public static String SAFETYNET_KEY = "AIzaSyDqt8P-7F7CPCseMkOiVRgb1LY8RN1bvH8";
 diff --git a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
 index ba3aacd3..32d5219e 100644
 --- a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
