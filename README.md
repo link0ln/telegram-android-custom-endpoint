@@ -1,0 +1,64 @@
+# telegram-android-custom-endpoint
+
+Route the official **Telegram for Android** through your own server over
+**genuine TLS**, so it survives pattern-based DPI that blocks Telegram's built-in
+Fake-TLS MTProxy.
+
+## Why
+
+Telegram's MTProxy (even in Fake-TLS `ee` mode) answers a TLS `ClientHello` with a
+minimal, non-standard flight. Sophisticated DPI (e.g. Russia's TSPU on some mobile
+carriers) can tell it apart from a real TLS server and black-holes it — while
+ordinary HTTPS to the same IP passes fine. There is no way to fix this from the
+proxy side, because Telegram's proxy protocol never performs a real TLS handshake.
+
+This project sidesteps it: a lightly patched Telegram client opens a **real TLS
+connection** (BoringSSL, real handshake, your certificate) to a small relay you
+run. On the wire it is indistinguishable from normal HTTPS to your domain, so
+there is nothing for the DPI to match. The relay reads a tiny routing header and
+forwards the still-end-to-end-encrypted MTProto to the real Telegram DCs.
+
+```
+ Telegram app (patched)                          your server                Telegram
+ ┌───────────────────┐   REAL TLS (:443,        ┌──────────┐   MTProto      ┌────────┐
+ │ genuine BoringSSL  │──  SNI = your domain) ──▶│ mtrelay  │──────────────▶ │ DC 1..5 │
+ │ TLS + TGR1<dc> hdr │                          │ (TLS term│                └────────┘
+ └───────────────────┘                          │ + route) │
+                                                 │  else ──▶ optional cover website
+                                                 └──────────┘
+```
+
+The MTProto payload stays end-to-end encrypted between the app and Telegram — the
+relay only sees TLS-wrapped, already-encrypted bytes and which DC to forward to.
+
+## Layout
+
+* [`server/`](server/) — the relay: `mtrelay.py` + `Dockerfile` + `docker-compose.yml`.
+  Terminates TLS on 443, routes to the Telegram DCs, optionally masks other traffic
+  to a cover site. **stdlib only, no dependencies.**
+* [`client/`](client/) — a patch + two new files for
+  [DrKLO/Telegram](https://github.com/DrKLO/Telegram): a first-run **Setup** screen
+  (`api_id`, `api_hash`, endpoint host) and the native real-TLS transport.
+
+## Quick start
+
+1. **Server:** point a domain at your VPS, get a TLS cert, `docker compose up -d`
+   in `server/` (see [server/README.md](server/README.md)).
+2. **Client:** apply the patch to a DrKLO/Telegram checkout and build the APK
+   (see [client/README.md](client/README.md)).
+3. Install the APK, and on first launch enter your `api_id` + `api_hash`
+   (from https://my.telegram.org) and your relay's domain.
+
+## Status
+
+Working end to end (login + chats + media) on a mobile network where the ordinary
+MTProxy was blocked. This is a proof-of-concept / self-host tool, not a polished
+product — see the TODO in [client/README.md](client/README.md).
+
+## Legal
+
+The client portion is derived from **DrKLO/Telegram**, licensed under the
+**GNU GPL v2 or later**; this repository inherits that license (see `LICENSE`).
+You are responsible for your own `api_id`/`api_hash` (per Telegram's terms) and
+for how you operate the relay. Nothing here weakens Telegram's end-to-end MTProto
+encryption.

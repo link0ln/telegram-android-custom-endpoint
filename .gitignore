@@ -1,0 +1,13 @@
+# TLS certs / secrets — never commit
+server/certs/
+*.pem
+*.key
+.env
+
+# build artifacts
+*.apk
+__pycache__/
+*.pyc
+
+# android local config
+local.properties

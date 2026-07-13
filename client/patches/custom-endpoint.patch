@@ -1,0 +1,397 @@
+diff --git a/TMessagesProj/jni/CMakeLists.txt b/TMessagesProj/jni/CMakeLists.txt
+index ad4364c5..af3dbef2 100644
+--- a/TMessagesProj/jni/CMakeLists.txt
++++ b/TMessagesProj/jni/CMakeLists.txt
+@@ -214,7 +214,7 @@ target_compile_definitions(tgnet PUBLIC
+ target_include_directories(tgnet PUBLIC
+         boringssl/include/)
+ target_link_libraries(tgnet
+-        crypto)
++        ssl crypto)
+ 
+ #rlottie
+ add_library(rlottie STATIC
+diff --git a/TMessagesProj/jni/tgnet/Connection.cpp b/TMessagesProj/jni/tgnet/Connection.cpp
+index 3ce0c222..ccb5bb4e 100644
+--- a/TMessagesProj/jni/tgnet/Connection.cpp
++++ b/TMessagesProj/jni/tgnet/Connection.cpp
+@@ -364,6 +364,11 @@ void Connection::connect() {
+     lastPacketLength = 0;
+     wasConnected = false;
+     hasSomeDataSinceLastConnect = false;
++    {   // CUSTOM: which DC this connection is for -> goes into the relay routing header
++        int32_t _dc = currentDatacenter->getDatacenterId();
++        if (_dc < 0) _dc = -_dc;
++        relayDcId = (uint8_t) ((_dc >= 1 && _dc <= 5) ? _dc : 2);
++    }
+     openConnection(hostAddress, hostPort, secret, ipv6 != 0, ConnectionsManager::getInstance(currentDatacenter->instanceNum).currentNetworkType);
+     if (connectionType == ConnectionTypeProxy) {
+         setTimeout(5);
+diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
+index 4605c2fc..2895c963 100644
+--- a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
++++ b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
+@@ -20,6 +20,8 @@
+ #include <algorithm>
+ #include <utility>
+ #include <openssl/bn.h>
++#include <openssl/ssl.h>
++#include <openssl/err.h>
+ #include "ByteStream.h"
+ #include "ConnectionSocket.h"
+ #include "FileLog.h"
+@@ -470,6 +472,7 @@ ConnectionSocket::~ConnectionSocket() {
+         tlsBuffer->reuse();
+         tlsBuffer = nullptr;
+     }
++    realTlsFree();
+ }
+ 
+ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::string secret, bool ipv6, int32_t networkType) {
+@@ -477,6 +480,8 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
+     isIpv6 = ipv6;
+     currentAddress = address;
+     currentPort = port;
++    useRealTls = (port == 443 && !ConnectionsManager::relayIp.empty());   // CUSTOM: genuine TLS only when a relay endpoint is configured
++    realTlsConnected = false;
+     waitingForHostResolve = "";
+     adjustWriteOpAfterResolve = false;
+     tlsState = 0;
+@@ -684,9 +689,107 @@ void ConnectionSocket::closeSocket(int32_t reason, int32_t error) {
+         tlsBuffer->reuse();
+         tlsBuffer = nullptr;
+     }
++    realTlsFree();
+     onDisconnected(reason, error);
+ }
+ 
++// ================= CUSTOM: genuine TLS to relay endpoint (SNI the configured host) =================
++void ConnectionSocket::realTlsInit() {
++    static SSL_CTX *ctx = nullptr;
++    if (ctx == nullptr) {
++        ctx = SSL_CTX_new(TLS_client_method());
++        SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
++        SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);   // relay cert not validated; MTProto stays E2E to the DC
++    }
++    SSL *ssl = SSL_new(ctx);
++    BIO *rb = BIO_new(BIO_s_mem());
++    BIO *wb = BIO_new(BIO_s_mem());
++    SSL_set_bio(ssl, rb, wb);
++    const std::string &sni = ConnectionsManager::relaySni;
++    SSL_set_tlsext_host_name(ssl, sni.empty() ? "www.microsoft.com" : sni.c_str());
++    SSL_set_connect_state(ssl);
++    sslHandle = ssl;
++    sslRbio = rb;
++    sslWbio = wb;
++    realTlsConnected = false;
++}
++
++void ConnectionSocket::realTlsFree() {
++    if (sslHandle != nullptr) {
++        SSL_free((SSL *) sslHandle);   // also frees the attached BIOs
++        sslHandle = nullptr;
++        sslRbio = nullptr;
++        sslWbio = nullptr;
++    }
++    realTlsConnected = false;
++}
++
++void ConnectionSocket::realTlsFlushOut() {
++    if (sslWbio == nullptr) return;
++    char buf[16384];
++    int n;
++    while ((n = BIO_read((BIO *) sslWbio, buf, sizeof(buf))) > 0) {
++        int off = 0;
++        while (off < n) {
++            ssize_t s = send(socketFd, buf + off, (size_t) (n - off), 0);
++            if (s <= 0) return;
++            off += (int) s;
++        }
++    }
++}
++
++bool ConnectionSocket::realTlsHandshakeStep() {
++    SSL *ssl = (SSL *) sslHandle;
++    if (ssl == nullptr) return false;
++    int r = SSL_do_handshake(ssl);
++    realTlsFlushOut();
++    if (r == 1) {
++        realTlsConnected = true;
++        if (LOGS_ENABLED) DEBUG_D("connection(%p) real TLS handshake complete, relay dc=%d", this, (int) relayDcId);
++        uint8_t routeHdr[5] = { 'T', 'G', 'R', '1', relayDcId };   // CUSTOM: DC-routing header for our relay
++        SSL_write((SSL *) sslHandle, routeHdr, 5);
++        realTlsFlushOut();
++        if (!onConnectedSent) {
++            lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
++            onConnected();
++            onConnectedSent = true;
++        }
++        adjustWriteOp();
++        return true;
++    }
++    int err = SSL_get_error(ssl, r);
++    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
++        adjustWriteOp();
++        return false;
++    }
++    if (LOGS_ENABLED) DEBUG_E("connection(%p) real TLS handshake fatal error %d", this, err);
++    closeSocket(1, -1);
++    return false;
++}
++
++void ConnectionSocket::realTlsOnReadable(uint8_t *data, int len) {
++    if (sslHandle == nullptr) realTlsInit();
++    BIO_write((BIO *) sslRbio, data, len);   // ciphertext consumed into rbio (data may now be overwritten)
++    if (!realTlsConnected) {
++        if (!realTlsHandshakeStep()) return;
++    }
++    SSL *ssl = (SSL *) sslHandle;
++    NativeByteBuffer *nb = ConnectionsManager::getInstance(instanceNum).networkBuffer;
++    while (true) {
++        nb->rewind();
++        int n = SSL_read(ssl, nb->bytes(), READ_BUFFER_SIZE);
++        if (n <= 0) break;
++        nb->limit((uint32_t) n);
++        onReceivedData(nb);
++    }
++}
++
++void ConnectionSocket::realTlsWrite(uint8_t *data, uint32_t len) {
++    if (sslHandle == nullptr) return;
++    SSL_write((SSL *) sslHandle, data, (int) len);
++    realTlsFlushOut();
++}
++
+ void ConnectionSocket::onEvent(uint32_t events) {
+     if (events & EPOLLIN) {
+         int32_t error;
+@@ -712,6 +815,10 @@ void ConnectionSocket::onEvent(uint32_t events) {
+                 if (readCount > 0) {
+                     buffer->limit((uint32_t) readCount);
+                     lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
++                    if (useRealTls) {
++                        realTlsOnReadable(buffer->bytes(), (int) readCount);
++                        continue;
++                    }
+                     if (proxyAuthState == 11) {
+                         if (LOGS_ENABLED) DEBUG_D("connection(%p) TLS received %d", this, (int) readCount);
+                         size_t newBytesRead = bytesRead + readCount;
+@@ -996,6 +1103,13 @@ void ConnectionSocket::onEvent(uint32_t events) {
+                     }
+                 }
+             } else {
++                if (useRealTls) {
++                    if (sslHandle == nullptr) realTlsInit();
++                    if (!realTlsConnected) {
++                        realTlsHandshakeStep();   // drive TLS handshake; onConnected() fires inside on completion
++                        return;
++                    }
++                }
+                 if (!onConnectedSent) {
+                     lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
+                     if (LOGS_ENABLED) DEBUG_D("connection(%p) reset last event time, on connect", this);
+@@ -1010,7 +1124,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
+                 uint32_t remaining = buffer->remaining();
+                 if (remaining) {
+                     ssize_t sentLength;
+-                    if (tlsState != 0) {
++                    if (useRealTls) {
++                        realTlsWrite(buffer->bytes(), remaining);   // plaintext MTProto -> genuine TLS records
++                        if (ConnectionsManager::getInstance(instanceNum).delegate != nullptr) {
++                            ConnectionsManager::getInstance(instanceNum).delegate->onBytesSent((int32_t) remaining, currentNetworkType, instanceNum);
++                        }
++                        outgoingByteStream->discard(remaining);
++                        adjustWriteOp();
++                    } else if (tlsState != 0) {
+                         if (remaining > 2878) {
+                             remaining = 2878;
+                         }
+diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.h b/TMessagesProj/jni/tgnet/ConnectionSocket.h
+index 15ffee89..88f4ae5f 100644
+--- a/TMessagesProj/jni/tgnet/ConnectionSocket.h
++++ b/TMessagesProj/jni/tgnet/ConnectionSocket.h
+@@ -80,6 +80,20 @@ private:
+     size_t bytesRead = 0;
+     int8_t tlsState = 0;
+ 
++    // ---- CUSTOM: genuine TLS wrapper to the relay endpoint (SNI the configured host) ----
++    bool useRealTls = false;
++    bool realTlsConnected = false;
++    uint8_t relayDcId = 2;
++    void *sslHandle = nullptr;
++    void *sslRbio = nullptr;
++    void *sslWbio = nullptr;
++    void realTlsInit();
++    void realTlsFree();
++    void realTlsFlushOut();
++    bool realTlsHandshakeStep();
++    void realTlsOnReadable(uint8_t *data, int len);
++    void realTlsWrite(uint8_t *data, uint32_t len);
++
+     uint8_t proxyAuthState;
+ 
+     int32_t checkSocketError(int32_t *error);
+diff --git a/TMessagesProj/jni/tgnet/ConnectionsManager.cpp b/TMessagesProj/jni/tgnet/ConnectionsManager.cpp
+index 32d590e8..394f4fb0 100644
+--- a/TMessagesProj/jni/tgnet/ConnectionsManager.cpp
++++ b/TMessagesProj/jni/tgnet/ConnectionsManager.cpp
+@@ -1814,6 +1814,17 @@ uint8_t ConnectionsManager::getIpStratagy() {
+ void ConnectionsManager::initDatacenters() {
+     Datacenter *datacenter;
+     if (!testBackend) {
++        // ---- CUSTOM: if a relay endpoint is configured, point every DC at it on 443 (DC id conveyed via in-TLS header) ----
++        if (!relayIp.empty()) {
++            for (int id = 1; id <= 5; id++) {
++                if (datacenters.find(id) != datacenters.end()) continue;
++                datacenter = new Datacenter(instanceNum, id);
++                datacenter->addAddressAndPort(relayIp, (uint16_t) 443, 0, "");
++                datacenters[id] = datacenter;
++            }
++            return;
++        }
++        // no relay configured -> fall through to the real Telegram bootstrap addresses (plain Telegram)
+         if (datacenters.find(1) == datacenters.end()) {
+             datacenter = new Datacenter(instanceNum, 1);
+             datacenter->addAddressAndPort("149.154.175.50", 443, 0, "");
+@@ -3433,10 +3444,12 @@ void ConnectionsManager::updateDcSettings(uint32_t dcNum, bool workaround, bool
+                         datacenter = new Datacenter(instanceNum, iter.first);
+                         datacenters[iter.first] = datacenter;
+                     }
+-                    datacenter->replaceAddresses(info->addressesIpv4, info->isCdn ? 8 : 0);
+-                    datacenter->replaceAddresses(info->addressesIpv6, info->isCdn ? 9 : 1);
+-                    datacenter->replaceAddresses(info->addressesIpv4Download, info->isCdn ? 10 : 2);
+-                    datacenter->replaceAddresses(info->addressesIpv6Download, info->isCdn ? 11 : 3);
++                    if (iter.first < 1 || iter.first > 5) {   // CUSTOM: keep relay addresses for DC1-5, don't let getConfig overwrite them
++                        datacenter->replaceAddresses(info->addressesIpv4, info->isCdn ? 8 : 0);
++                        datacenter->replaceAddresses(info->addressesIpv6, info->isCdn ? 9 : 1);
++                        datacenter->replaceAddresses(info->addressesIpv4Download, info->isCdn ? 10 : 2);
++                        datacenter->replaceAddresses(info->addressesIpv6Download, info->isCdn ? 11 : 3);
++                    }
+                     if (iter.first == movingToDatacenterId) {
+                         movingToDatacenterId = DEFAULT_DATACENTER_ID;
+                         moveToDatacenter(iter.first);
+@@ -3645,6 +3658,9 @@ void ConnectionsManager::applyDnsConfig(NativeByteBuffer *buffer, std::string ph
+     });
+ }
+ 
++std::string ConnectionsManager::relayIp = "";
++std::string ConnectionsManager::relaySni = "";
++
+ void ConnectionsManager::init(uint32_t version, int32_t layer, int32_t apiId, std::string deviceModel, std::string systemVersion, std::string appVersion, std::string langCode, std::string systemLangCode, std::string configPath, std::string logPath, std::string regId, std::string cFingerpting, std::string installerId, std::string packageId, int32_t timezoneOffset, int64_t userId, bool userPremium, bool isPaused, bool enablePushConnection, bool hasNetwork, int32_t networkType, int32_t performanceClass) {
+     currentVersion = version;
+     currentLayer = layer;
+@@ -3675,6 +3691,17 @@ void ConnectionsManager::init(uint32_t version, int32_t layer, int32_t apiId, st
+         currentConfigPath += "/";
+     }
+ 
++    {   // CUSTOM: load relay endpoint written by Java from user settings -> "ip\nsni"
++        std::string cfgFile = currentConfigPath + "relay.cfg";
++        FILE *rf = fopen(cfgFile.c_str(), "r");
++        if (rf != nullptr) {
++            char l1[128] = {0}, l2[256] = {0};
++            if (fgets(l1, sizeof(l1), rf)) { std::string s(l1); size_t p = s.find_last_not_of(" \r\n\t"); relayIp = (p == std::string::npos) ? "" : s.substr(0, p + 1); }
++            if (fgets(l2, sizeof(l2), rf)) { std::string s(l2); size_t p = s.find_last_not_of(" \r\n\t"); relaySni = (p == std::string::npos) ? "" : s.substr(0, p + 1); }
++            fclose(rf);
++        }
++    }
++
+     if (!logPath.empty()) {
+         LOGS_ENABLED = true;
+         FileLog::getInstance().init(logPath);
+diff --git a/TMessagesProj/jni/tgnet/ConnectionsManager.h b/TMessagesProj/jni/tgnet/ConnectionsManager.h
+index d5ab4bdd..78267251 100644
+--- a/TMessagesProj/jni/tgnet/ConnectionsManager.h
++++ b/TMessagesProj/jni/tgnet/ConnectionsManager.h
+@@ -43,6 +43,8 @@ public:
+     ~ConnectionsManager();
+ 
+     static ConnectionsManager &getInstance(int32_t instanceNum);
++    static std::string relayIp;    // CUSTOM: relay endpoint IP (from user settings via relay.cfg); empty = direct Telegram
++    static std::string relaySni;   // CUSTOM: relay TLS SNI (hostname)
+     int64_t getCurrentTimeMillis();
+     int64_t getCurrentTimeMonotonicMillis();
+     int32_t getCurrentTime();
+diff --git a/TMessagesProj/src/main/AndroidManifest.xml b/TMessagesProj/src/main/AndroidManifest.xml
+index 6f6d377d..19145a10 100644
+--- a/TMessagesProj/src/main/AndroidManifest.xml
++++ b/TMessagesProj/src/main/AndroidManifest.xml
+@@ -207,6 +207,12 @@
+             <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+         </activity-alias>
+ 
++        <activity
++            android:name="org.telegram.messenger.ConfigActivity"
++            android:theme="@android:style/Theme.Material.Light.NoActionBar"
++            android:configChanges="keyboard|keyboardHidden|orientation|screenSize"
++            android:exported="false" />
++
+         <activity
+             android:name="org.telegram.ui.LaunchActivity"
+             android:theme="@style/Theme.TMessages.Start"
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java b/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+index b1caaddb..c4860c84 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+@@ -26,8 +26,8 @@ public class BuildVars {
+     public static boolean NO_SCOPED_STORAGE = Build.VERSION.SDK_INT <= 29;
+     public static String BUILD_VERSION_STRING = BuildConfig.BUILD_VERSION_STRING;
+ 
+-    public static int APP_ID = 4;
+-    public static String APP_HASH = "014b35b6184100b085b0d0572f9b5103";
++    public static int APP_ID = 0;
++    public static String APP_HASH = "";
+ 
+     // SafetyNet key for Google Identity SDK, set it to empty to disable
+     public static String SAFETYNET_KEY = "AIzaSyDqt8P-7F7CPCseMkOiVRgb1LY8RN1bvH8";
+diff --git a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
+index ba3aacd3..32d5219e 100644
+--- a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
++++ b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
+@@ -262,7 +262,7 @@ public class ConnectionsManager extends BaseController {
+         if (getUserConfig().getCurrentUser() != null) {
+             userPremium = getUserConfig().getCurrentUser().premium;
+         }
+-        init(SharedConfig.buildVersion(), TLRPC.LAYER, BuildVars.APP_ID, deviceModel, systemVersion, appVersion, langCode, systemLangCode, configPath, FileLog.getNetworkLogPath(), pushString, fingerprint, timezoneOffset, getUserConfig().getClientUserId(), userPremium, enablePushConnection);
++        init(SharedConfig.buildVersion(), TLRPC.LAYER, org.telegram.messenger.CustomConfig.getApiId(), deviceModel, systemVersion, appVersion, langCode, systemLangCode, configPath, FileLog.getNetworkLogPath(), pushString, fingerprint, timezoneOffset, getUserConfig().getClientUserId(), userPremium, enablePushConnection);
+     }
+ 
+     private String getRegId() {
+@@ -648,6 +648,7 @@ public class ConnectionsManager extends BaseController {
+             packageId = "";
+         }
+ 
++        org.telegram.messenger.CustomConfig.writeRelayFile(configPath);   // CUSTOM: write relay endpoint (ip\nsni) for native init() to read
+         native_init(currentAccount, version, layer, apiId, deviceModel, systemVersion, appVersion, langCode, systemLangCode, configPath, logPath, regId, cFingerprint, installer, packageId, timezoneOffset, userId, userPremium, enablePushConnection, ApplicationLoader.isNetworkOnline(), ApplicationLoader.getCurrentNetworkType(), SharedConfig.measureDevicePerformanceClass());
+         checkConnection();
+     }
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
+index 9cd2739a..00543fb2 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
+@@ -435,6 +435,11 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
+         flagSecureReason.attach();
+ 
+         super.onCreate(savedInstanceState);
++        if (!org.telegram.messenger.CustomConfig.isConfigured()) {
++            startActivity(new android.content.Intent(this, org.telegram.messenger.ConfigActivity.class));
++            finish();
++            return;
++        }
+         if (Build.VERSION.SDK_INT >= 24) {
+             AndroidUtilities.isInMultiwindow = isInMultiWindowMode();
+         }
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
+index d2834e63..9c3404b7 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
+@@ -3154,8 +3154,8 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
+                 ConnectionsManager.getInstance(currentAccount).cleanup(false);
+ 
+                 TLRPC.TL_auth_sendCode sendCode = new TLRPC.TL_auth_sendCode();
+-                sendCode.api_hash = BuildVars.APP_HASH;
+-                sendCode.api_id = BuildVars.APP_ID;
++                sendCode.api_hash = org.telegram.messenger.CustomConfig.getApiHash();
++                sendCode.api_id = org.telegram.messenger.CustomConfig.getApiId();
+                 sendCode.phone_number = phone;
+                 sendCode.settings = settings;
+                 req = sendCode;

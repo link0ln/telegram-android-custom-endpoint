@@ -1,0 +1,19 @@
+This project is licensed under the GNU General Public License v2.0 or later
+(GPL-2.0-or-later).
+
+The client/ portion is a derivative work of "Telegram for Android"
+(https://github.com/DrKLO/Telegram), Copyright Telegram Messenger LLP, which is
+licensed under the GNU General Public License v2 or later. As a derivative work
+it is distributed under the same terms. The client/patches directory contains
+only diffs against that upstream source; you must obtain the upstream source
+separately to build.
+
+The server/ relay and the repository's scripts are Copyright their contributors
+and are likewise licensed under the GNU General Public License v2 or later.
+
+The full text of the GNU General Public License, version 2, is available at:
+https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
