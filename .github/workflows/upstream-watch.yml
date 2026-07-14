@@ -1,0 +1,152 @@
+name: upstream-watch
+
+# DrKLO/Telegram no longer cuts GitHub releases/tags (last one: 11.4.2, Nov 2024).
+# It ships versions as master commits like "update to 12.8.1 (6916)". This job
+# polls master for a newer version than the one we pin, dry-runs the patch, opens a
+# tracking issue, and (if the patch still applies) builds an APK artifact.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"        # daily, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      new: ${{ steps.scan.outputs.new }}
+      ref: ${{ steps.scan.outputs.ref }}
+      version: ${{ steps.scan.outputs.version }}
+      build: ${{ steps.scan.outputs.build }}
+      dupe: ${{ steps.dedupe.outputs.dupe }}
+      applies: ${{ steps.check.outputs.applies }}
+    steps:
+      - name: Checkout patch repo
+        uses: actions/checkout@v4
+        with:
+          path: custom
+
+      - name: Find newest upstream version
+        id: scan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PIN_SHA=$(grep -oE 'TG_COMMIT: [0-9a-f]+' custom/.github/workflows/build.yml | awk '{print $2}')
+          PIN_MSG=$(gh api "repos/DrKLO/Telegram/commits/$PIN_SHA" --jq '.commit.message' | head -1)
+          PIN_VER=$(printf '%s' "$PIN_MSG" | grep -oE 'update to [0-9.]+' | awk '{print $3}')
+          echo "pinned: $PIN_MSG  (sha ${PIN_SHA:0:10}, version ${PIN_VER:-?})"
+
+          # Most recent "update to X.Y.Z (build)" commit on master (API returns newest-first).
+          # Compare by SEMANTIC VERSION, not the build number: DrKLO has a typo'd build
+          # (9.6.6 "(33562)") in history, so max-by-build would be wrong.
+          gh api "repos/DrKLO/Telegram/commits?sha=master&per_page=100" > commits.json
+          LINE=$(jq -r 'first(.[]
+                        | (.commit.message | split("\n")[0]) as $m
+                        | select($m | test("^update to [0-9.]+ *\\([0-9]+\\)"; "i"))
+                        | [ ($m | capture("update to (?<v>[0-9.]+)").v), .sha, ($m | capture("\\((?<b>[0-9]+)\\)").b) ])
+                       | @tsv' commits.json)
+          if [ -z "$LINE" ]; then
+            echo "no 'update to' commit found in last 100 — nothing to do"
+            echo "new=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          NEW_VER=$(printf '%s' "$LINE" | cut -f1)
+          NEW_SHA=$(printf '%s' "$LINE" | cut -f2)
+          NEW_BUILD=$(printf '%s' "$LINE" | cut -f3)
+          echo "newest upstream: $NEW_VER (build $NEW_BUILD) @ ${NEW_SHA:0:10}"
+
+          echo "ref=$NEW_SHA" >> "$GITHUB_OUTPUT"
+          echo "version=$NEW_VER" >> "$GITHUB_OUTPUT"
+          echo "build=$NEW_BUILD" >> "$GITHUB_OUTPUT"
+
+          HIGHER=$(printf '%s\n%s\n' "${PIN_VER:-0}" "$NEW_VER" | sort -V | tail -1)
+          if [ "$NEW_VER" != "${PIN_VER:-}" ] && [ "$HIGHER" = "$NEW_VER" ]; then
+            echo "new=true" >> "$GITHUB_OUTPUT"
+            echo "==> $NEW_VER is newer than pinned ${PIN_VER:-?}"
+          else
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            echo "==> up to date (pinned ${PIN_VER:-?} >= upstream $NEW_VER)"
+          fi
+
+      - name: Skip if already tracked
+        id: dedupe
+        if: steps.scan.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          MARK="upstream-build-${{ steps.scan.outputs.build }}"
+          CNT=$(gh issue list --repo "${{ github.repository }}" --state all \
+                  --search "$MARK in:title" --json number --jq 'length')
+          echo "existing issues for $MARK: $CNT"
+          if [ "$CNT" -gt 0 ]; then echo "dupe=true" >> "$GITHUB_OUTPUT"; else echo "dupe=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Dry-run patch against new upstream
+        id: check
+        if: steps.scan.outputs.new == 'true' && steps.dedupe.outputs.dupe == 'false'
+        run: |
+          set -euo pipefail
+          git init Telegram >/dev/null
+          cd Telegram
+          git remote add origin https://github.com/DrKLO/Telegram.git
+          git -c protocol.version=2 fetch --depth 1 origin "${{ steps.scan.outputs.ref }}"
+          git checkout --detach FETCH_HEAD >/dev/null
+          cd ..
+          if bash custom/client/apply.sh --check "$PWD/Telegram" 2> reject.txt; then
+            echo "applies=true" >> "$GITHUB_OUTPUT"
+            echo "patch applies cleanly"
+          else
+            echo "applies=false" >> "$GITHUB_OUTPUT"
+            echo "---- patch does NOT apply ----"; cat reject.txt || true
+          fi
+
+      - name: Open tracking issue
+        if: steps.scan.outputs.new == 'true' && steps.dedupe.outputs.dupe == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V="${{ steps.scan.outputs.version }}"
+          B="${{ steps.scan.outputs.build }}"
+          REF="${{ steps.scan.outputs.ref }}"
+          RUN="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          {
+            echo "DrKLO/Telegram shipped **$V (build $B)** at commit \`$REF\`."
+            echo
+            if [ "${{ steps.check.outputs.applies }}" = "true" ]; then
+              echo "The custom-endpoint patch **applies cleanly** against it. An arm64 APK"
+              echo "is being built in this run — grab it from the **Artifacts** here:"
+              echo
+              echo "$RUN"
+              echo
+              echo "Test it, then to make it the default: bump \`TG_COMMIT\` to \`$REF\`"
+              echo "in \`.github/workflows/build.yml\` and push a \`v*\` tag to cut a release."
+            else
+              echo "The custom-endpoint patch **does NOT apply** — it needs rebasing onto"
+              echo "the new upstream. \`git apply\` output:"
+              echo
+              echo '```'
+              head -60 reject.txt 2>/dev/null || echo "(no output captured)"
+              echo '```'
+              echo
+              echo "Rebase \`client/patches/custom-endpoint.patch\` against \`$REF\`, bump"
+              echo "\`TG_COMMIT\`, then push a \`v*\` tag."
+            fi
+          } > issue-body.md
+          if [ "${{ steps.check.outputs.applies }}" = "true" ]; then STATE="OK, building"; else STATE="NEEDS REBASE"; fi
+          gh issue create --repo "${{ github.repository }}" \
+            --title "Upstream $V ($B) — patch $STATE [upstream-build-$B]" \
+            --body-file issue-body.md
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.new == 'true' && needs.detect.outputs.dupe == 'false' && needs.detect.outputs.applies == 'true'
+    uses: ./.github/workflows/build.yml
+    with:
+      tg_ref: ${{ needs.detect.outputs.ref }}
+      all_abis: false
+      do_release: false

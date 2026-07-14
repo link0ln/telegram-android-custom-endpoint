@@ -7,12 +7,22 @@
 #
 set -euo pipefail
 
-TG="${1:?usage: ./apply.sh /path/to/Telegram-checkout}"
+CHECK=0
+if [ "${1:-}" = "--check" ]; then CHECK=1; shift; fi
+
+TG="${1:?usage: ./apply.sh [--check] /path/to/Telegram-checkout}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 if [ ! -d "$TG/TMessagesProj/jni/tgnet" ]; then
     echo "error: '$TG' does not look like a DrKLO/Telegram checkout" >&2
     exit 1
+fi
+
+if [ "$CHECK" -eq 1 ]; then
+    echo ">> dry-run: checking patch applies against $TG"
+    git -C "$TG" apply --check --whitespace=nowarn "$HERE/patches/custom-endpoint.patch"
+    echo ">> OK: patch applies cleanly"
+    exit 0
 fi
 
 echo ">> applying patch"

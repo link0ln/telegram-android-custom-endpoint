@@ -56,6 +56,18 @@ builds the client automatically — grab the artifact from the **Actions** tab, 
 tagged build from **Releases** (push a `v*` tag to cut one). It's debug-signed and
 you still enter your own `api_id`/`api_hash`/endpoint on first launch.
 
+**Staying current with upstream:** the client is a patch on top of
+[DrKLO/Telegram](https://github.com/DrKLO/Telegram) pinned to a specific commit
+(`TG_COMMIT` in the build workflow). A scheduled job
+([`.github/workflows/upstream-watch.yml`](.github/workflows/upstream-watch.yml))
+polls `master` daily for a newer version — DrKLO ships releases as
+`update to X.Y.Z` commits, not GitHub tags. When a newer one appears it dry-runs the
+patch and opens a tracking **issue**: if the patch still applies it also builds an
+APK artifact against the new version; if upstream reworked the native transport
+enough that the patch no longer applies, the issue flags it for a manual rebase.
+Promoting any build to a public **Release** is always a manual `v*` tag, so an
+unattended build is never published on its own.
+
 ## Status
 
 Working end to end (login + chats + media) on a mobile network where the ordinary

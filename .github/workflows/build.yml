@@ -1,6 +1,21 @@
 name: build-apk
 
 on:
+  workflow_call:
+    inputs:
+      tg_ref:
+        description: "DrKLO/Telegram ref (commit SHA or tag) to build; empty = pinned TG_COMMIT"
+        type: string
+        required: false
+        default: ""
+      all_abis:
+        description: "Build all ABIs (universal APK) instead of arm64-only"
+        type: boolean
+        default: false
+      do_release:
+        description: "Publish a GitHub Release with the APK"
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       all_abis:
@@ -15,7 +30,7 @@ permissions:
   contents: write
 
 env:
-  # DrKLO/Telegram commit the client patch was made against
+  # DrKLO/Telegram commit the client patch was made against (default build target)
   TG_COMMIT: 9b50143d8896d255d03155598937e4f3e28afd86
 
 jobs:
@@ -42,12 +57,20 @@ jobs:
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
 
-      - name: Clone DrKLO/Telegram @ pinned commit
+      - name: Resolve upstream ref
+        id: ref
+        run: |
+          REF="${{ inputs.tg_ref }}"
+          if [ -z "$REF" ]; then REF="$TG_COMMIT"; fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "Building against DrKLO/Telegram @ $REF"
+
+      - name: Clone DrKLO/Telegram @ ref
         run: |
           git init Telegram
           cd Telegram
           git remote add origin https://github.com/DrKLO/Telegram.git
-          git -c protocol.version=2 fetch --depth 1 origin "$TG_COMMIT"
+          git -c protocol.version=2 fetch --depth 1 origin "${{ steps.ref.outputs.ref }}"
           git checkout --detach FETCH_HEAD
 
       - name: Apply custom-endpoint patch
@@ -90,8 +113,8 @@ jobs:
             tg-custom-endpoint.apk
             tg-custom-endpoint.apk.sha256
 
-      - name: Publish release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Publish release
+        if: ${{ startsWith(github.ref, 'refs/tags/') || inputs.do_release }}
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -103,4 +126,4 @@ jobs:
             Debug-signed; installs alongside the official app as
             `org.telegram.messenger.beta`. On first launch enter your
             `api_id`, `api_hash` (https://my.telegram.org) and your relay
-            endpoint host. Built from DrKLO/Telegram @ ${{ env.TG_COMMIT }}.
+            endpoint host. Built from DrKLO/Telegram @ ${{ steps.ref.outputs.ref }}.
