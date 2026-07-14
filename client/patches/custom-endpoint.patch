@@ -28,7 +28,7 @@ index 3ce0c222..ccb5bb4e 100644
      if (connectionType == ConnectionTypeProxy) {
          setTimeout(5);
 diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
-index 4605c2fc..2895c963 100644
+index 4605c2fc..701394a1 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
 +++ b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
 @@ -20,6 +20,8 @@
@@ -57,7 +57,7 @@ index 4605c2fc..2895c963 100644
      waitingForHostResolve = "";
      adjustWriteOpAfterResolve = false;
      tlsState = 0;
-@@ -684,9 +689,107 @@ void ConnectionSocket::closeSocket(int32_t reason, int32_t error) {
+@@ -684,9 +689,108 @@ void ConnectionSocket::closeSocket(int32_t reason, int32_t error) {
          tlsBuffer->reuse();
          tlsBuffer = nullptr;
      }
@@ -145,9 +145,10 @@ index 4605c2fc..2895c963 100644
 +    if (!realTlsConnected) {
 +        if (!realTlsHandshakeStep()) return;
 +    }
-+    SSL *ssl = (SSL *) sslHandle;
 +    NativeByteBuffer *nb = ConnectionsManager::getInstance(instanceNum).networkBuffer;
 +    while (true) {
++        SSL *ssl = (SSL *) sslHandle;   // CUSTOM: re-read each iter; onReceivedData() may closeSocket()->realTlsFree()
++        if (ssl == nullptr) break;      // CUSTOM: SSL freed underneath us -> stop (fixes use-after-free SIGSEGV)
 +        nb->rewind();
 +        int n = SSL_read(ssl, nb->bytes(), READ_BUFFER_SIZE);
 +        if (n <= 0) break;
@@ -165,7 +166,7 @@ index 4605c2fc..2895c963 100644
  void ConnectionSocket::onEvent(uint32_t events) {
      if (events & EPOLLIN) {
          int32_t error;
-@@ -712,6 +815,10 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -712,6 +816,10 @@ void ConnectionSocket::onEvent(uint32_t events) {
                  if (readCount > 0) {
                      buffer->limit((uint32_t) readCount);
                      lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
@@ -176,7 +177,7 @@ index 4605c2fc..2895c963 100644
                      if (proxyAuthState == 11) {
                          if (LOGS_ENABLED) DEBUG_D("connection(%p) TLS received %d", this, (int) readCount);
                          size_t newBytesRead = bytesRead + readCount;
-@@ -996,6 +1103,13 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -996,6 +1104,13 @@ void ConnectionSocket::onEvent(uint32_t events) {
                      }
                  }
              } else {
@@ -190,7 +191,7 @@ index 4605c2fc..2895c963 100644
                  if (!onConnectedSent) {
                      lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
                      if (LOGS_ENABLED) DEBUG_D("connection(%p) reset last event time, on connect", this);
-@@ -1010,7 +1124,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -1010,7 +1125,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
                  uint32_t remaining = buffer->remaining();
                  if (remaining) {
                      ssize_t sentLength;
@@ -332,14 +333,13 @@ diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java b
 index b1caaddb..c4860c84 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
-@@ -26,5 +26,5 @@ public class BuildVars {
-     public static boolean NO_SCOPED_STORAGE = Build.VERSION.SDK_INT <= 29;
-     public static String BUILD_VERSION_STRING = BuildConfig.BUILD_VERSION_STRING;
+@@ -28,4 +28,4 @@ public class BuildVars {
  
 -    public static int APP_ID = 4;
 -    public static String APP_HASH = "014b35b6184100b085b0d0572f9b5103";
 +    public static int APP_ID = 0;
 +    public static String APP_HASH = "";
+ 
 diff --git a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
 index ba3aacd3..32d5219e 100644
 --- a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
