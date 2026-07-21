@@ -30,8 +30,8 @@ permissions:
   contents: write
 
 env:
-  # DrKLO/Telegram commit the client patch was made against (default build target)
-  TG_COMMIT: 9b50143d8896d255d03155598937e4f3e28afd86
+  # DrKLO/Telegram commit to build against; patch verified to apply cleanly here
+  TG_COMMIT: 9bcf3d2769c6d3f07105a992e5d9493e33ac3348   # 12.9.0 (6966)
 
 jobs:
   build:
