@@ -131,6 +131,8 @@ jobs:
   build:
     needs: detect
     if: needs.detect.outputs.new == 'true' && needs.detect.outputs.dupe == 'false' && needs.detect.outputs.applies == 'true'
+    permissions:
+      contents: write   # reusable build.yml declares contents: write (for its release step); caller must grant >=
     uses: ./.github/workflows/build.yml
     with:
       tg_ref: ${{ needs.detect.outputs.ref }}
