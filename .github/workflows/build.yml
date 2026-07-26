@@ -76,6 +76,26 @@ jobs:
       - name: Apply custom-endpoint patch
         run: bash custom/client/apply.sh "$PWD/Telegram"
 
+      - name: Set up release signing
+        id: signing
+        env:
+          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > Telegram/TMessagesProj/config/release.keystore
+            # Keep building the 'afat debug' variant (retains the .beta suffix and skips
+            # R8/minify so the patch's classes are never stripped) but make it a proper
+            # release: non-debuggable + signed with the custom keystore below.
+            sed -i -e 's/debuggable true/debuggable false/g' \
+                   -e 's/jniDebuggable true/jniDebuggable false/g' \
+              Telegram/TMessagesProj_App/build.gradle
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo ">> release signing ON (non-debuggable, custom keystore)"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo ">> no SIGNING_KEYSTORE_BASE64 secret -> debug-signed, debuggable build"
+          fi
+
       - name: Limit to arm64-v8a (faster)
         if: ${{ !inputs.all_abis }}
         run: |
@@ -95,9 +115,21 @@ jobs:
           restore-keys: gradle-
 
       - name: Build APK
+        env:
+          SP: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          KP: ${{ secrets.SIGNING_KEY_PASSWORD }}
+          KA: ${{ secrets.SIGNING_KEY_ALIAS }}
         run: |
           cd Telegram
           chmod +x gradlew
+          # Only override the signing props when a keystore secret was provided; otherwise
+          # gradle.properties defaults (DrKLO's checked-in debug key) apply. Passed via
+          # ORG_GRADLE_PROJECT_* env (not -P) so passwords never hit the process args.
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            export ORG_GRADLE_PROJECT_RELEASE_STORE_PASSWORD="$SP"
+            export ORG_GRADLE_PROJECT_RELEASE_KEY_PASSWORD="$KP"
+            export ORG_GRADLE_PROJECT_RELEASE_KEY_ALIAS="$KA"
+          fi
           ./gradlew :TMessagesProj_App:assembleAfatDebug --no-daemon --stacktrace
 
       - name: Collect APK
