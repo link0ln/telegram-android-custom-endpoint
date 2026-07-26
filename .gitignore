@@ -4,6 +4,12 @@ server/certs/
 *.key
 .env
 
+# APK signing material — never commit (keystore lives outside this repo)
+*.keystore
+*.jks
+*.b64
+keystore-password*.txt
+
 # build artifacts
 *.apk
 __pycache__/
