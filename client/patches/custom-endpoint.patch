@@ -15,19 +15,21 @@ index 3ce0c222..ccb5bb4e 100644
      if (connectionType == ConnectionTypeProxy) {
          setTimeout(5);
 diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
-index 4605c2fc..8e8f71dc 100644
+index 4605c2fc..2ca4a0b3 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
 +++ b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
-@@ -20,6 +20,8 @@
+@@ -20,6 +20,10 @@
  #include <algorithm>
  #include <utility>
  #include <openssl/bn.h>
 +#include <openssl/ssl.h>
 +#include <openssl/err.h>
++#include <openssl/x509.h>
++#include <openssl/sha.h>
  #include "ByteStream.h"
  #include "ConnectionSocket.h"
  #include "FileLog.h"
-@@ -470,6 +472,7 @@ ConnectionSocket::~ConnectionSocket() {
+@@ -470,6 +474,7 @@ ConnectionSocket::~ConnectionSocket() {
          tlsBuffer->reuse();
          tlsBuffer = nullptr;
      }
@@ -35,7 +37,7 @@ index 4605c2fc..8e8f71dc 100644
  }
  
  void ConnectionSocket::openConnection(std::string address, uint16_t port, std::string secret, bool ipv6, int32_t networkType) {
-@@ -477,6 +480,16 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
+@@ -477,6 +482,16 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
      isIpv6 = ipv6;
      currentAddress = address;
      currentPort = port;
@@ -52,7 +54,7 @@ index 4605c2fc..8e8f71dc 100644
      waitingForHostResolve = "";
      adjustWriteOpAfterResolve = false;
      tlsState = 0;
-@@ -684,9 +697,108 @@ void ConnectionSocket::closeSocket(int32_t reason, int32_t error) {
+@@ -684,9 +699,287 @@ void ConnectionSocket::closeSocket(int32_t reason, int32_t error) {
          tlsBuffer->reuse();
          tlsBuffer = nullptr;
      }
@@ -79,6 +81,119 @@ index 4605c2fc..8e8f71dc 100644
 +    sslRbio = rb;
 +    sslWbio = wb;
 +    realTlsConnected = false;
++}
++
++// CUSTOM: base32 (RFC 4648, no padding) as printed to the customer. Skips
++// separators and repairs the 0/O 1/I 8/B confusions, which is unambiguous
++// because none of those digits are in the alphabet.
++static bool relayB32Decode(const std::string &text, uint8_t *out, size_t outLen) {
++    uint64_t buffer = 0;
++    int bits = 0;
++    size_t n = 0;
++    for (size_t i = 0; i < text.size(); i++) {
++        char c = text[i];
++        if (c >= 'a' && c <= 'z') {
++            c = (char) (c - 'a' + 'A');
++        }
++        if (c == '0') {
++            c = 'O';
++        } else if (c == '1') {
++            c = 'I';
++        } else if (c == '8') {
++            c = 'B';
++        }
++        int v;
++        if (c >= 'A' && c <= 'Z') {
++            v = c - 'A';
++        } else if (c >= '2' && c <= '7') {
++            v = c - '2' + 26;
++        } else {
++            continue;
++        }
++        buffer = (buffer << 5) | (uint64_t) v;
++        bits += 5;
++        if (bits >= 8) {
++            bits -= 8;
++            if (n >= outLen) {
++                return false;
++            }
++            out[n++] = (uint8_t) ((buffer >> bits) & 0xFF);
++        }
++    }
++    return n == outLen;
++}
++
++static bool relayHexDecode(const std::string &text, uint8_t *out, size_t outLen) {
++    if (text.size() != outLen * 2) {
++        return false;
++    }
++    for (size_t i = 0; i < outLen; i++) {
++        int hi = -1, lo = -1;
++        char a = text[i * 2], b = text[i * 2 + 1];
++        if (a >= '0' && a <= '9') hi = a - '0'; else if (a >= 'a' && a <= 'f') hi = a - 'a' + 10; else if (a >= 'A' && a <= 'F') hi = a - 'A' + 10;
++        if (b >= '0' && b <= '9') lo = b - '0'; else if (b >= 'a' && b <= 'f') lo = b - 'a' + 10; else if (b >= 'A' && b <= 'F') lo = b - 'A' + 10;
++        if (hi < 0 || lo < 0) {
++            return false;
++        }
++        out[i] = (uint8_t) ((hi << 4) | lo);
++    }
++    return true;
++}
++
++// CUSTOM: the relay certificate is not chain-verified here (see realTlsInit),
++// which was harmless while this channel carried only end-to-end encrypted
++// MTProto. It stops being harmless once a bearer token travels in it: without
++// this check an on-path attacker - exactly the adversary we exist to defeat -
++// could impersonate the relay and harvest tokens. The pin is learned by the
++// Java layer, which does verify properly. Empty pin = self-hosting, no check.
++bool ConnectionSocket::realTlsCheckPin() {
++    const std::string &pin = ConnectionsManager::relayPin;
++    if (pin.empty()) {
++        return true;
++    }
++    uint8_t want[32];
++    if (!relayHexDecode(pin, want, sizeof(want))) {
++        return true;   // malformed pin: fail open rather than brick the client
++    }
++    X509 *cert = SSL_get_peer_certificate((SSL *) sslHandle);
++    if (cert == nullptr) {
++        return false;
++    }
++    uint8_t *der = nullptr;
++    int derLen = i2d_X509_PUBKEY(X509_get_X509_PUBKEY(cert), &der);
++    bool ok = false;
++    if (derLen > 0 && der != nullptr) {
++        uint8_t got[32];
++        SHA256(der, (size_t) derLen, got);
++        ok = memcmp(got, want, sizeof(want)) == 0;
++        OPENSSL_free(der);
++    }
++    X509_free(cert);
++    if (!ok && LOGS_ENABLED) {
++        DEBUG_E("connection(%p) relay public key does not match the pin", this);
++    }
++    return ok;
++}
++
++// CUSTOM: 39-byte v2 hello: "TGR" + version + mode + token + device + ext_len.
++bool ConnectionSocket::realTlsBuildHello(uint8_t *out) {
++    uint8_t token[16], device[16];
++    if (!relayB32Decode(ConnectionsManager::relayToken, token, sizeof(token))) {
++        return false;
++    }
++    if (!relayHexDecode(ConnectionsManager::relayDeviceId, device, sizeof(device))) {
++        return false;
++    }
++    out[0] = 'T';
++    out[1] = 'G';
++    out[2] = 'R';
++    out[3] = 0x02;
++    out[4] = relayDcId;
++    memcpy(out + 5, token, 16);
++    memcpy(out + 21, device, 16);
++    out[37] = 0;
++    out[38] = 0;
++    return true;
 +}
 +
 +void ConnectionSocket::realTlsFree() {
@@ -113,14 +228,37 @@ index 4605c2fc..8e8f71dc 100644
 +    if (r == 1) {
 +        realTlsConnected = true;
 +        if (LOGS_ENABLED) DEBUG_D("connection(%p) real TLS handshake complete, relay dc=%d", this, (int) relayDcId);
-+        uint8_t routeHdr[5] = { 'T', 'G', 'R', '1', relayDcId };   // CUSTOM: DC-routing header for our relay
-+        SSL_write((SSL *) sslHandle, routeHdr, 5);
-+        realTlsFlushOut();
-+        if (!onConnectedSent) {
-+            lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
-+            onConnected();
-+            onConnectedSent = true;
++        if (!realTlsCheckPin()) {
++            closeSocket(1, -1);
++            return false;
 +        }
++        if (ConnectionsManager::relayToken.empty()) {
++            // CUSTOM: no subscription configured - keep the original 5-byte
++            // header so a self-hosted relay works exactly as before.
++            uint8_t routeHdr[5] = { 'T', 'G', 'R', '1', relayDcId };
++            SSL_write((SSL *) sslHandle, routeHdr, 5);
++            realTlsFlushOut();
++            relayHelloState = 2;
++            if (!onConnectedSent) {
++                lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
++                onConnected();
++                onConnectedSent = true;
++            }
++            adjustWriteOp();
++            return true;
++        }
++        uint8_t hello[39];
++        if (!realTlsBuildHello(hello)) {
++            if (LOGS_ENABLED) DEBUG_E("connection(%p) relay token/device id is malformed", this);
++            closeSocket(1, -1);
++            return false;
++        }
++        SSL_write((SSL *) sslHandle, hello, sizeof(hello));
++        realTlsFlushOut();
++        // CUSTOM: deliberately NOT calling onConnected() yet. tgnet would start
++        // pushing MTProto into a socket the relay may be about to drop, and the
++        // subscription verdict has not arrived. See realTlsOnReadable.
++        relayHelloState = 1;
 +        adjustWriteOp();
 +        return true;
 +    }
@@ -139,6 +277,49 @@ index 4605c2fc..8e8f71dc 100644
 +    BIO_write((BIO *) sslRbio, data, len);   // ciphertext consumed into rbio (data may now be overwritten)
 +    if (!realTlsConnected) {
 +        if (!realTlsHandshakeStep()) return;
++    }
++    if (relayHelloState == 1) {
++        // CUSTOM: the relay answers a v2 hello with one 10-byte frame before
++        // anything else. It may arrive split across epoll wakeups, so the
++        // partial is kept in relayHelloBuf. OK frames carry no payload, which
++        // is what keeps this a fixed-size read with no body state to track.
++        while (relayHelloLen < sizeof(relayHelloBuf)) {
++            SSL *ssl0 = (SSL *) sslHandle;
++            if (ssl0 == nullptr) {
++                return;
++            }
++            int n = SSL_read(ssl0, relayHelloBuf + relayHelloLen,
++                             (int) (sizeof(relayHelloBuf) - relayHelloLen));
++            if (n <= 0) {
++                return;
++            }
++            relayHelloLen += (uint8_t) n;
++        }
++        if (relayHelloBuf[0] != 'T' || relayHelloBuf[1] != 'G' ||
++            relayHelloBuf[2] != 'S' || relayHelloBuf[3] != '2') {
++            // Not our relay, or an unknown token was masked to the cover site
++            // and we are looking at that site's response. Both mean "no service
++            // here" and neither is distinguishable from the other by design.
++            if (LOGS_ENABLED) DEBUG_E("connection(%p) relay did not answer with a status frame", this);
++            closeSocket(1, -1);
++            return;
++        }
++        uint8_t stcode = relayHelloBuf[4];
++        uint16_t ttl = (uint16_t) ((relayHelloBuf[6] << 8) | relayHelloBuf[7]);
++        uint16_t plen = (uint16_t) ((relayHelloBuf[8] << 8) | relayHelloBuf[9]);
++        ConnectionsManager::writeRelayStatus(stcode, ttl);
++        if (stcode != 0 || plen != 0) {
++            if (LOGS_ENABLED) DEBUG_E("connection(%p) relay refused: status=%d ttl=%d", this, (int) stcode, (int) ttl);
++            closeSocket(1, -1);
++            return;
++        }
++        relayHelloState = 2;
++        if (!onConnectedSent) {
++            lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
++            onConnected();
++            onConnectedSent = true;
++        }
++        adjustWriteOp();
 +    }
 +    NativeByteBuffer *nb = ConnectionsManager::getInstance(instanceNum).networkBuffer;
 +    while (true) {
@@ -161,7 +342,7 @@ index 4605c2fc..8e8f71dc 100644
  void ConnectionSocket::onEvent(uint32_t events) {
      if (events & EPOLLIN) {
          int32_t error;
-@@ -712,6 +824,10 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -712,6 +1005,10 @@ void ConnectionSocket::onEvent(uint32_t events) {
                  if (readCount > 0) {
                      buffer->limit((uint32_t) readCount);
                      lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
@@ -172,7 +353,7 @@ index 4605c2fc..8e8f71dc 100644
                      if (proxyAuthState == 11) {
                          if (LOGS_ENABLED) DEBUG_D("connection(%p) TLS received %d", this, (int) readCount);
                          size_t newBytesRead = bytesRead + readCount;
-@@ -996,6 +1112,13 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -996,6 +1293,13 @@ void ConnectionSocket::onEvent(uint32_t events) {
                      }
                  }
              } else {
@@ -186,7 +367,7 @@ index 4605c2fc..8e8f71dc 100644
                  if (!onConnectedSent) {
                      lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
                      if (LOGS_ENABLED) DEBUG_D("connection(%p) reset last event time, on connect", this);
-@@ -1010,7 +1133,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -1010,7 +1314,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
                  uint32_t remaining = buffer->remaining();
                  if (remaining) {
                      ssize_t sentLength;
@@ -203,10 +384,10 @@ index 4605c2fc..8e8f71dc 100644
                              remaining = 2878;
                          }
 diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.h b/TMessagesProj/jni/tgnet/ConnectionSocket.h
-index 15ffee89..2b53779a 100644
+index 15ffee89..ffc89d35 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionSocket.h
 +++ b/TMessagesProj/jni/tgnet/ConnectionSocket.h
-@@ -80,6 +80,20 @@ private:
+@@ -80,6 +80,25 @@ private:
      size_t bytesRead = 0;
      int8_t tlsState = 0;
  
@@ -214,6 +395,11 @@ index 15ffee89..2b53779a 100644
 +    bool useRealTls = false;
 +    bool realTlsConnected = false;
 +    uint8_t relayDcId = 2;
++    uint8_t relayHelloState = 0;      // CUSTOM: 0 = not sent, 1 = awaiting the relay's answer, 2 = authorized
++    uint8_t relayHelloBuf[10] = {0};  // CUSTOM: partial status frame across epoll wakeups
++    uint8_t relayHelloLen = 0;        // CUSTOM
++    bool realTlsCheckPin();           // CUSTOM
++    bool realTlsBuildHello(uint8_t *out);   // CUSTOM
 +    void *sslHandle = nullptr;
 +    void *sslRbio = nullptr;
 +    void *sslWbio = nullptr;
@@ -228,7 +414,7 @@ index 15ffee89..2b53779a 100644
  
      int32_t checkSocketError(int32_t *error);
 diff --git a/TMessagesProj/jni/tgnet/ConnectionsManager.cpp b/TMessagesProj/jni/tgnet/ConnectionsManager.cpp
-index 32d590e8..98ad35ef 100644
+index 32d590e8..49a683b2 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionsManager.cpp
 +++ b/TMessagesProj/jni/tgnet/ConnectionsManager.cpp
 @@ -1814,6 +1814,17 @@ uint8_t ConnectionsManager::getIpStratagy() {
@@ -249,27 +435,89 @@ index 32d590e8..98ad35ef 100644
          if (datacenters.find(1) == datacenters.end()) {
              datacenter = new Datacenter(instanceNum, 1);
              datacenter->addAddressAndPort("149.154.175.50", 443, 0, "");
-@@ -3645,6 +3656,9 @@ void ConnectionsManager::applyDnsConfig(NativeByteBuffer *buffer, std::string ph
+@@ -3645,6 +3656,45 @@ void ConnectionsManager::applyDnsConfig(NativeByteBuffer *buffer, std::string ph
      });
  }
  
 +std::string ConnectionsManager::relayIp = "";
 +std::string ConnectionsManager::relaySni = "";
++std::string ConnectionsManager::relayToken = "";
++std::string ConnectionsManager::relayDeviceId = "";
++std::string ConnectionsManager::relayPin = "";
++std::string ConnectionsManager::relayStatusPath = "";
++
++// CUSTOM: hand the subscription verdict to the Java layer.
++// Written to a temp file and renamed, because the Java side watches the
++// directory for an atomic move - watching the file itself would miss it.
++// Rate limited: tgnet reconnects hard when it is refused, and every attempt
++// produces the same answer.
++void ConnectionsManager::writeRelayStatus(uint8_t status, uint16_t ttlDays) {
++    if (relayStatusPath.empty()) {
++        return;
++    }
++    // Write immediately when the verdict CHANGES, and at most every 30s
++    // otherwise. tgnet retries hard when it is refused, so without this a
++    // single refusal would rewrite this file - and wake the Java watcher -
++    // once per reconnect, dozens of times a second.
++    static int64_t lastWrite = 0;
++    static int lastStatus = -1;
++    int64_t now = (int64_t) std::chrono::duration_cast<std::chrono::seconds>(
++            std::chrono::system_clock::now().time_since_epoch()).count();
++    if (status == lastStatus && now - lastWrite < 30) {
++        return;
++    }
++    lastWrite = now;
++    lastStatus = status;
++    std::string tmp = relayStatusPath + ".tmp";
++    FILE *f = fopen(tmp.c_str(), "w");
++    if (f == nullptr) {
++        return;
++    }
++    fprintf(f, "status=%d\nttl=%d\nts=%lld\n", (int) status, (int) ttlDays, (long long) now);
++    fclose(f);
++    rename(tmp.c_str(), relayStatusPath.c_str());
++}
 +
  void ConnectionsManager::init(uint32_t version, int32_t layer, int32_t apiId, std::string deviceModel, std::string systemVersion, std::string appVersion, std::string langCode, std::string systemLangCode, std::string configPath, std::string logPath, std::string regId, std::string cFingerpting, std::string installerId, std::string packageId, int32_t timezoneOffset, int64_t userId, bool userPremium, bool isPaused, bool enablePushConnection, bool hasNetwork, int32_t networkType, int32_t performanceClass) {
      currentVersion = version;
      currentLayer = layer;
-@@ -3675,6 +3689,17 @@ void ConnectionsManager::init(uint32_t version, int32_t layer, int32_t apiId, st
+@@ -3675,6 +3725,43 @@ void ConnectionsManager::init(uint32_t version, int32_t layer, int32_t apiId, st
          currentConfigPath += "/";
      }
  
-+    {   // CUSTOM: load relay endpoint written by Java from user settings -> "ip\nsni"
++    {   // CUSTOM: load relay settings written by Java as key=value lines.
++        // Keys rather than fixed positions: this is read with a fixed-size
++        // buffer, and with positional lines one overlong value silently spills
++        // into the next read and shifts every field after it. An overlong tail
++        // here just looks like an unknown key and is ignored.
 +        std::string cfgFile = currentConfigPath + "relay.cfg";
 +        FILE *rf = fopen(cfgFile.c_str(), "r");
 +        if (rf != nullptr) {
-+            char l1[128] = {0}, l2[256] = {0};
-+            if (fgets(l1, sizeof(l1), rf)) { std::string s(l1); size_t p = s.find_last_not_of(" \r\n\t"); relayIp = (p == std::string::npos) ? "" : s.substr(0, p + 1); }
-+            if (fgets(l2, sizeof(l2), rf)) { std::string s(l2); size_t p = s.find_last_not_of(" \r\n\t"); relaySni = (p == std::string::npos) ? "" : s.substr(0, p + 1); }
++            char line[1024];
++            while (fgets(line, sizeof(line), rf) != nullptr) {
++                std::string s(line);
++                size_t eq = s.find('=');
++                if (eq == std::string::npos) {
++                    continue;
++                }
++                std::string k = s.substr(0, eq);
++                std::string v = s.substr(eq + 1);
++                size_t p = v.find_last_not_of(" \r\n\t");
++                v = (p == std::string::npos) ? "" : v.substr(0, p + 1);
++                if (k == "ip") {
++                    relayIp = v;
++                } else if (k == "sni") {
++                    relaySni = v;
++                } else if (k == "token") {
++                    relayToken = v;
++                } else if (k == "dev") {
++                    relayDeviceId = v;
++                } else if (k == "pin") {
++                    relayPin = v;
++                } else if (k == "status") {
++                    relayStatusPath = v;
++                }
++            }
 +            fclose(rf);
 +        }
 +    }
@@ -278,15 +526,20 @@ index 32d590e8..98ad35ef 100644
          LOGS_ENABLED = true;
          FileLog::getInstance().init(logPath);
 diff --git a/TMessagesProj/jni/tgnet/ConnectionsManager.h b/TMessagesProj/jni/tgnet/ConnectionsManager.h
-index d5ab4bdd..78267251 100644
+index d5ab4bdd..38b97248 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionsManager.h
 +++ b/TMessagesProj/jni/tgnet/ConnectionsManager.h
-@@ -43,6 +43,8 @@ public:
+@@ -43,6 +43,13 @@ public:
      ~ConnectionsManager();
  
      static ConnectionsManager &getInstance(int32_t instanceNum);
-+    static std::string relayIp;    // CUSTOM: relay endpoint IP (from user settings via relay.cfg); empty = direct Telegram
-+    static std::string relaySni;   // CUSTOM: relay TLS SNI (hostname)
++    static std::string relayIp;          // CUSTOM: relay endpoint IP (from relay.cfg); empty = direct Telegram
++    static std::string relaySni;         // CUSTOM: relay TLS SNI (hostname)
++    static std::string relayToken;       // CUSTOM: subscription token, base32 as printed by the vendor; empty = legacy v1 header
++    static std::string relayDeviceId;    // CUSTOM: 32 hex chars identifying this install
++    static std::string relayPin;         // CUSTOM: sha256 of the relay cert's public key, 64 hex; empty = unpinned
++    static std::string relayStatusPath;  // CUSTOM: where to drop subscription status for the Java layer
++    static void writeRelayStatus(uint8_t status, uint16_t ttlDays);   // CUSTOM
      int64_t getCurrentTimeMillis();
      int64_t getCurrentTimeMonotonicMillis();
      int32_t getCurrentTime();

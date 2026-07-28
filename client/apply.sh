@@ -125,9 +125,9 @@ echo ">> applying in-place edits"
 apply_edits
 
 echo ">> copying new files"
-DEST="$TG/TMessagesProj/src/main/java/org/telegram/messenger"
-cp "$HERE/src/org/telegram/messenger/CustomConfig.java"   "$DEST/"
-cp "$HERE/src/org/telegram/messenger/ConfigActivity.java" "$DEST/"
+# copy the whole tree, so adding a class never means touching this script
+cp -r "$HERE/src/org" "$TG/TMessagesProj/src/main/java/"
+find "$HERE/src" -name '*.java' | sed "s|$HERE/src/|   + |"
 
 echo ">> done. Build with:"
 echo "   cd $TG && ./gradlew :TMessagesProj_App:assembleAfatDebug"
