@@ -1,16 +1,3 @@
-diff --git a/TMessagesProj/jni/CMakeLists.txt b/TMessagesProj/jni/CMakeLists.txt
-index ad4364c5..af3dbef2 100644
---- a/TMessagesProj/jni/CMakeLists.txt
-+++ b/TMessagesProj/jni/CMakeLists.txt
-@@ -214,7 +214,7 @@ target_compile_definitions(tgnet PUBLIC
- target_include_directories(tgnet PUBLIC
-         boringssl/include/)
- target_link_libraries(tgnet
--        crypto)
-+        ssl crypto)
- 
- #rlottie
- add_library(rlottie STATIC
 diff --git a/TMessagesProj/jni/tgnet/Connection.cpp b/TMessagesProj/jni/tgnet/Connection.cpp
 index 3ce0c222..ccb5bb4e 100644
 --- a/TMessagesProj/jni/tgnet/Connection.cpp
@@ -28,7 +15,7 @@ index 3ce0c222..ccb5bb4e 100644
      if (connectionType == ConnectionTypeProxy) {
          setTimeout(5);
 diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
-index 4605c2fc..701394a1 100644
+index 4605c2fc..8e8f71dc 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
 +++ b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
 @@ -20,6 +20,8 @@
@@ -48,16 +35,24 @@ index 4605c2fc..701394a1 100644
  }
  
  void ConnectionSocket::openConnection(std::string address, uint16_t port, std::string secret, bool ipv6, int32_t networkType) {
-@@ -477,6 +480,8 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
+@@ -477,6 +480,16 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
      isIpv6 = ipv6;
      currentAddress = address;
      currentPort = port;
-+    useRealTls = (port == 443 && !ConnectionsManager::relayIp.empty());   // CUSTOM: genuine TLS only when a relay endpoint is configured
++    if (!ConnectionsManager::relayIp.empty()) {   // CUSTOM: the relay is authoritative - override whatever address tgnet picked
++        address = ConnectionsManager::relayIp;    // (cached tgnet.dat, getConfig results, DC migration all get ignored)
++        port = 443;
++        ipv6 = false;
++        isIpv6 = false;
++        currentAddress = address;
++        currentPort = port;
++    }
++    useRealTls = !ConnectionsManager::relayIp.empty();   // CUSTOM: genuine TLS whenever a relay endpoint is configured
 +    realTlsConnected = false;
      waitingForHostResolve = "";
      adjustWriteOpAfterResolve = false;
      tlsState = 0;
-@@ -684,9 +689,108 @@ void ConnectionSocket::closeSocket(int32_t reason, int32_t error) {
+@@ -684,9 +697,108 @@ void ConnectionSocket::closeSocket(int32_t reason, int32_t error) {
          tlsBuffer->reuse();
          tlsBuffer = nullptr;
      }
@@ -166,7 +161,7 @@ index 4605c2fc..701394a1 100644
  void ConnectionSocket::onEvent(uint32_t events) {
      if (events & EPOLLIN) {
          int32_t error;
-@@ -712,6 +816,10 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -712,6 +824,10 @@ void ConnectionSocket::onEvent(uint32_t events) {
                  if (readCount > 0) {
                      buffer->limit((uint32_t) readCount);
                      lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
@@ -177,7 +172,7 @@ index 4605c2fc..701394a1 100644
                      if (proxyAuthState == 11) {
                          if (LOGS_ENABLED) DEBUG_D("connection(%p) TLS received %d", this, (int) readCount);
                          size_t newBytesRead = bytesRead + readCount;
-@@ -996,6 +1104,13 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -996,6 +1112,13 @@ void ConnectionSocket::onEvent(uint32_t events) {
                      }
                  }
              } else {
@@ -191,7 +186,7 @@ index 4605c2fc..701394a1 100644
                  if (!onConnectedSent) {
                      lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
                      if (LOGS_ENABLED) DEBUG_D("connection(%p) reset last event time, on connect", this);
-@@ -1010,7 +1125,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -1010,7 +1133,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
                  uint32_t remaining = buffer->remaining();
                  if (remaining) {
                      ssize_t sentLength;
@@ -208,7 +203,7 @@ index 4605c2fc..701394a1 100644
                              remaining = 2878;
                          }
 diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.h b/TMessagesProj/jni/tgnet/ConnectionSocket.h
-index 15ffee89..88f4ae5f 100644
+index 15ffee89..2b53779a 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionSocket.h
 +++ b/TMessagesProj/jni/tgnet/ConnectionSocket.h
 @@ -80,6 +80,20 @@ private:
@@ -233,7 +228,7 @@ index 15ffee89..88f4ae5f 100644
  
      int32_t checkSocketError(int32_t *error);
 diff --git a/TMessagesProj/jni/tgnet/ConnectionsManager.cpp b/TMessagesProj/jni/tgnet/ConnectionsManager.cpp
-index 32d590e8..394f4fb0 100644
+index 32d590e8..98ad35ef 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionsManager.cpp
 +++ b/TMessagesProj/jni/tgnet/ConnectionsManager.cpp
 @@ -1814,6 +1814,17 @@ uint8_t ConnectionsManager::getIpStratagy() {
@@ -254,24 +249,7 @@ index 32d590e8..394f4fb0 100644
          if (datacenters.find(1) == datacenters.end()) {
              datacenter = new Datacenter(instanceNum, 1);
              datacenter->addAddressAndPort("149.154.175.50", 443, 0, "");
-@@ -3433,10 +3444,12 @@ void ConnectionsManager::updateDcSettings(uint32_t dcNum, bool workaround, bool
-                         datacenter = new Datacenter(instanceNum, iter.first);
-                         datacenters[iter.first] = datacenter;
-                     }
--                    datacenter->replaceAddresses(info->addressesIpv4, info->isCdn ? 8 : 0);
--                    datacenter->replaceAddresses(info->addressesIpv6, info->isCdn ? 9 : 1);
--                    datacenter->replaceAddresses(info->addressesIpv4Download, info->isCdn ? 10 : 2);
--                    datacenter->replaceAddresses(info->addressesIpv6Download, info->isCdn ? 11 : 3);
-+                    if (iter.first < 1 || iter.first > 5) {   // CUSTOM: keep relay addresses for DC1-5, don't let getConfig overwrite them
-+                        datacenter->replaceAddresses(info->addressesIpv4, info->isCdn ? 8 : 0);
-+                        datacenter->replaceAddresses(info->addressesIpv6, info->isCdn ? 9 : 1);
-+                        datacenter->replaceAddresses(info->addressesIpv4Download, info->isCdn ? 10 : 2);
-+                        datacenter->replaceAddresses(info->addressesIpv6Download, info->isCdn ? 11 : 3);
-+                    }
-                     if (iter.first == movingToDatacenterId) {
-                         movingToDatacenterId = DEFAULT_DATACENTER_ID;
-                         moveToDatacenter(iter.first);
-@@ -3645,6 +3658,9 @@ void ConnectionsManager::applyDnsConfig(NativeByteBuffer *buffer, std::string ph
+@@ -3645,6 +3656,9 @@ void ConnectionsManager::applyDnsConfig(NativeByteBuffer *buffer, std::string ph
      });
  }
  
@@ -281,7 +259,7 @@ index 32d590e8..394f4fb0 100644
  void ConnectionsManager::init(uint32_t version, int32_t layer, int32_t apiId, std::string deviceModel, std::string systemVersion, std::string appVersion, std::string langCode, std::string systemLangCode, std::string configPath, std::string logPath, std::string regId, std::string cFingerpting, std::string installerId, std::string packageId, int32_t timezoneOffset, int64_t userId, bool userPremium, bool isPaused, bool enablePushConnection, bool hasNetwork, int32_t networkType, int32_t performanceClass) {
      currentVersion = version;
      currentLayer = layer;
-@@ -3675,6 +3691,17 @@ void ConnectionsManager::init(uint32_t version, int32_t layer, int32_t apiId, st
+@@ -3675,6 +3689,17 @@ void ConnectionsManager::init(uint32_t version, int32_t layer, int32_t apiId, st
          currentConfigPath += "/";
      }
  
@@ -329,43 +307,11 @@ index 6f6d377d..19145a10 100644
          <activity
              android:name="org.telegram.ui.LaunchActivity"
              android:theme="@style/Theme.TMessages.Start"
-diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java b/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
-index b1caaddb..c4860c84 100644
---- a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
-+++ b/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
-@@ -28,4 +28,4 @@ public class BuildVars {
- 
--    public static int APP_ID = 4;
--    public static String APP_HASH = "014b35b6184100b085b0d0572f9b5103";
-+    public static int APP_ID = 0;
-+    public static String APP_HASH = "";
- 
-diff --git a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
-index ba3aacd3..32d5219e 100644
---- a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
-+++ b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
-@@ -262,7 +262,7 @@ public class ConnectionsManager extends BaseController {
-         if (getUserConfig().getCurrentUser() != null) {
-             userPremium = getUserConfig().getCurrentUser().premium;
-         }
--        init(SharedConfig.buildVersion(), TLRPC.LAYER, BuildVars.APP_ID, deviceModel, systemVersion, appVersion, langCode, systemLangCode, configPath, FileLog.getNetworkLogPath(), pushString, fingerprint, timezoneOffset, getUserConfig().getClientUserId(), userPremium, enablePushConnection);
-+        init(SharedConfig.buildVersion(), TLRPC.LAYER, org.telegram.messenger.CustomConfig.getApiId(), deviceModel, systemVersion, appVersion, langCode, systemLangCode, configPath, FileLog.getNetworkLogPath(), pushString, fingerprint, timezoneOffset, getUserConfig().getClientUserId(), userPremium, enablePushConnection);
-     }
- 
-     private String getRegId() {
-@@ -648,6 +648,7 @@ public class ConnectionsManager extends BaseController {
-             packageId = "";
-         }
- 
-+        org.telegram.messenger.CustomConfig.writeRelayFile(configPath);   // CUSTOM: write relay endpoint (ip\nsni) for native init() to read
-         native_init(currentAccount, version, layer, apiId, deviceModel, systemVersion, appVersion, langCode, systemLangCode, configPath, logPath, regId, cFingerprint, installer, packageId, timezoneOffset, userId, userPremium, enablePushConnection, ApplicationLoader.isNetworkOnline(), ApplicationLoader.getCurrentNetworkType(), SharedConfig.measureDevicePerformanceClass());
-         checkConnection();
-     }
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
-index 9cd2739a..00543fb2 100644
+index aa7f5ed8..59acda0f 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
-@@ -435,6 +435,11 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
+@@ -436,6 +436,11 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
          flagSecureReason.attach();
  
          super.onCreate(savedInstanceState);
@@ -377,18 +323,3 @@ index 9cd2739a..00543fb2 100644
          if (Build.VERSION.SDK_INT >= 24) {
              AndroidUtilities.isInMultiwindow = isInMultiWindowMode();
          }
-diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
-index d2834e63..9c3404b7 100644
---- a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
-+++ b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
-@@ -3154,8 +3154,8 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
-                 ConnectionsManager.getInstance(currentAccount).cleanup(false);
- 
-                 TLRPC.TL_auth_sendCode sendCode = new TLRPC.TL_auth_sendCode();
--                sendCode.api_hash = BuildVars.APP_HASH;
--                sendCode.api_id = BuildVars.APP_ID;
-+                sendCode.api_hash = org.telegram.messenger.CustomConfig.getApiHash();
-+                sendCode.api_id = org.telegram.messenger.CustomConfig.getApiId();
-                 sendCode.phone_number = phone;
-                 sendCode.settings = settings;
-                 req = sendCode;
