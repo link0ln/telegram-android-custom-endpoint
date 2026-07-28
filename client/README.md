@@ -8,9 +8,19 @@ endpoints are baked in.
 
 ## What it does
 
-* Adds a **Setup screen** (`ConfigActivity`): a setup code (when the relay runs a
-  subscription), the relay endpoint host, and the user's own `api_id` /
-  `api_hash`. Stored in `SharedPreferences` via `CustomConfig`.
+* Adds a **Setup flow** (`ConfigActivity`), reachable at first launch and
+  afterwards from its own **"Relay Setup"** launcher icon:
+  1. a setup code (`host[:port][@ip]|TOKEN|CHECK`) or just an endpoint host for
+     a self-hosted relay — validated against the relay before anything is saved;
+  2. the user's own `api_id` / `api_hash`, either entered by hand or read
+     automatically from my.telegram.org in an in-app WebView tunnelled through
+     the relay;
+  3. a renewal screen when the subscription lapses.
+* **The constraint the flow is built around:** my.telegram.org sends its
+  confirmation code as a *Telegram message*, never by SMS, so creating an
+  api_id needs an account already signed in somewhere else. That cannot be
+  engineered away, so the copy says it before the user starts rather than after
+  they are stuck, and there is a dedicated screen listing the ways out.
 * The native transport (`tgnet`) is patched so that, when an endpoint is set,
   every datacenter resolves to `<endpoint>:443` and the socket performs a
   **genuine BoringSSL TLS handshake** (SNI = your host) instead of the stock
@@ -54,6 +64,31 @@ Renew the relay certificate with `--reuse-key`, or plan a pin rotation.
 | `src/org/telegram/messenger/ConfigActivity.java` | setup screen |
 | `src/org/telegram/messenger/RelayClient.java` | Java speaker of the relay protocol; learns the pin |
 | `src/org/telegram/messenger/DeviceId.java` | random per-install id, for the device limit |
+| `src/org/telegram/messenger/RelayStatus.java` | watches the verdict native writes; opens the renewal screen |
+| `src/org/telegram/messenger/LocalProxy.java` | loopback CONNECT proxy that carries the setup WebView through the relay |
+| `src/org/telegram/messenger/MyTelegramExtractor.java` | reads api_id / api_hash off the my.telegram.org page |
+
+### The WebView bridge
+
+A WebView uses the system network stack, not tgnet, so it cannot use the native
+relay transport — and on the networks this product is for, my.telegram.org is
+precisely what is blocked. `LocalProxy` bridges the two: it listens on loopback,
+speaks ordinary HTTP `CONNECT`, and carries each request to the relay as a
+tunnel. `ProxyController` (androidx.webkit, added by `apply.sh`) points the
+WebView at it.
+
+Two things about that are deliberate. The proxy runs **only while the setup step
+is on screen** — while it is up, any app on the device could reach the
+whitelisted hosts through the customer's subscription. And the proxy override is
+process-wide, so it is cleared on the way out; leaving it set would quietly
+route every later WebView in the app through the relay.
+
+Extraction scans **`innerText`, never HTML**: the login page carries a hidden
+`random_hash` and the create-app form a hidden `hash`, both 32 hex characters
+and indistinguishable from an api_hash in markup. Hidden input values never
+appear in innerText, so reading text excludes them structurally instead of by
+guesswork. The create-app form is prefilled but never auto-submitted — the user
+presses the button, so nothing is created on their account unasked.
 
 ### Why some edits are not in the patch
 
@@ -115,9 +150,15 @@ adb shell run-as org.telegram.messenger.beta sh -c 'printf "status=1\nttl=0\n" >
 * Changing the endpoint after login should also clear the saved DC config
   (`files/**/tgnet.dat`). The connect-time address override makes this mostly
   cosmetic now, but the stale file is still confusing when debugging.
-* Still to come: a guided flow for obtaining `api_id`/`api_hash` from
-  my.telegram.org through the relay's tunnel, a renewal screen driven by the
-  status file, a way back into Setup after configuration, and re-resolving the
-  endpoint when its address changes.
+* The endpoint address is re-resolved by `CustomConfig.refreshEndpointIp()`;
+  because native reads `relay.cfg` only during `init()`, a changed address takes
+  effect on the next process start rather than immediately.
+* `ConfigActivity` is exported so it can have a launcher icon, so it must treat
+  its extras as a hint and never act destructively on one without a confirming
+  tap.
 * You may want to hide the "Test Backend" checkbox in `LoginActivity` (its test
   DCs are not routed through the relay) and rename the package for a real release.
+* The headless fallback for my.telegram.org (driving the forms over the tunnel
+  without a WebView) is not implemented: manual entry covers the same case, and
+  a scripted login is both brittle and the sort of thing Telegram treats as
+  abuse.

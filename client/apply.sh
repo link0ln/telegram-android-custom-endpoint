@@ -101,11 +101,21 @@ apply_edits() {
         's/TLRPC\.LAYER, BuildVars\.APP_ID,/TLRPC.LAYER, org.telegram.messenger.CustomConfig.getApiId(),/' \
         "ConnectionsManager: api_id from user config"
 
+    # The setup WebView has to reach my.telegram.org through the relay, and the
+    # only supported way to point a WebView at a proxy is ProxyController, which
+    # lives in androidx.webkit. Appended here rather than patched so a gradle
+    # reshuffle upstream cannot break it.
+    subst "TMessagesProj/build.gradle" \
+        '^dependencies \{$' \
+        'androidx\.webkit:webkit' \
+        "/^dependencies {\$/a\\    implementation 'androidx.webkit:webkit:1.12.1'" \
+        "build.gradle: androidx.webkit for the setup WebView"
+
     # relay.cfg has to exist before native init() reads it
     subst "TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java" \
         '^[[:space:]]*native_init\(currentAccount, version' \
         'CustomConfig\.writeRelayFile\(configPath\);' \
-        's|^\([[:space:]]*\)native_init(currentAccount, version|\1org.telegram.messenger.CustomConfig.writeRelayFile(configPath);   // CUSTOM: relay.cfg must exist before native init() reads it\n\1native_init(currentAccount, version|' \
+        's|^\([[:space:]]*\)native_init(currentAccount, version|\1org.telegram.messenger.CustomConfig.writeRelayFile(configPath);   // CUSTOM: relay.cfg must exist before native init() reads it\n\1org.telegram.messenger.RelayStatus.start(configPath);            // CUSTOM: watch for the subscription verdict native writes back\n\1native_init(currentAccount, version|' \
         "ConnectionsManager: write relay.cfg before native_init"
 }
 

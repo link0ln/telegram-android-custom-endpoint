@@ -81,6 +81,13 @@ The **setup code** is the single string the customer types into the app. Only
 `sha256(token)` is stored, so a lost code cannot be recovered — use
 `relayctl rotate` to issue a replacement.
 
+Its full form is `host[:port][@ip]|TOKEN|CHECK`. The optional `:port` lets a
+staging relay run beside a production one on the same hostname and certificate
+(`--port 8443`), and `@ip` pins an address for networks with a poisoned
+resolver. `CHECK` is a 4-character checksum, so a mistyped code fails
+immediately with "check the code" instead of failing to connect — which on this
+product is indistinguishable from "the relay is blocked here".
+
 Common operations:
 
 ```bash

@@ -140,14 +140,17 @@ public class RelayClient {
 
     // ---- setup code ---------------------------------------------------
 
+    public static final int DEFAULT_PORT = 443;
+
     public static class SetupCode {
         public String host = "";
-        public String ip;          // optional pin, for poisoned-DNS networks
+        public int port = DEFAULT_PORT;   // lets staging sit beside production
+        public String ip;                 // optional pin, for poisoned-DNS networks
         public String token = "";
     }
 
-    /** Parse "host|TOKEN|CHECK" or "host@ip|TOKEN|CHECK". Returns null if the
-     *  checksum does not match, which means the code was mistyped. */
+    /** Parse "host[:port][@ip]|TOKEN|CHECK". Returns null if the checksum does
+     *  not match, which means the code was mistyped. */
     public static SetupCode parseSetupCode(String text) {
         if (text == null) {
             return null;
@@ -167,10 +170,19 @@ public class RelayClient {
         }
         SetupCode sc = new SetupCode();
         int at = hostpart.indexOf('@');
-        sc.host = at >= 0 ? hostpart.substring(0, at) : hostpart;
+        String rest = at >= 0 ? hostpart.substring(0, at) : hostpart;
         sc.ip = at >= 0 ? hostpart.substring(at + 1) : null;
+        int colon = rest.indexOf(':');
+        sc.host = colon >= 0 ? rest.substring(0, colon) : rest;
+        if (colon >= 0) {
+            try {
+                sc.port = Integer.parseInt(rest.substring(colon + 1));
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
         sc.token = token;
-        if (sc.host.isEmpty()) {
+        if (sc.host.isEmpty() || sc.port <= 0 || sc.port > 65535) {
             return null;
         }
         return sc;
@@ -208,12 +220,12 @@ public class RelayClient {
      * poisoned resolver cannot redirect us, while SNI and verification still
      * use the real hostname.
      */
-    public static SSLSocket connect(String host, String ip, int timeoutMs) throws IOException {
+    public static SSLSocket connect(String host, String ip, int port, int timeoutMs) throws IOException {
         Socket raw = new Socket();
-        raw.connect(new InetSocketAddress(ip != null && !ip.isEmpty() ? ip : host, 443), timeoutMs);
+        raw.connect(new InetSocketAddress(ip != null && !ip.isEmpty() ? ip : host, port), timeoutMs);
         raw.setSoTimeout(timeoutMs);
         SSLSocket s = (SSLSocket) ((SSLSocketFactory) SSLSocketFactory.getDefault())
-                .createSocket(raw, host, 443, true);
+                .createSocket(raw, host, port, true);
         SSLParameters p = s.getSSLParameters();
         p.setEndpointIdentificationAlgorithm("HTTPS");
         s.setSSLParameters(p);
@@ -293,7 +305,7 @@ public class RelayClient {
      * as ST_NO_ANSWER, because "wrong token" and "blocked network" must look
      * the same to the user - the relay makes them look the same on the wire.
      */
-    public static Status ping(String host, String ip, String tokenText, int timeoutMs) {
+    public static Status ping(String host, String ip, int port, String tokenText, int timeoutMs) {
         Status st = new Status();
         byte[] token = decodeToken(tokenText);
         if (token == null) {
@@ -302,7 +314,7 @@ public class RelayClient {
         byte[] device = decodeHex(DeviceId.get());
         SSLSocket sock = null;
         try {
-            sock = connect(host, ip, timeoutMs);
+            sock = connect(host, ip, port, timeoutMs);
             st.pin = pinOf(sock);
             OutputStream out = sock.getOutputStream();
             out.write(buildHello(MODE_PING, token, device, null));
@@ -327,7 +339,7 @@ public class RelayClient {
      * positioned right after the relay's acknowledgement, ready to carry the
      * caller's own TLS session, or null if the relay refused.
      */
-    public static SSLSocket tunnel(String host, String ip, String tokenText,
+    public static SSLSocket tunnel(String host, String ip, int port, String tokenText,
                                    String targetHost, int timeoutMs) {
         byte[] token = decodeToken(tokenText);
         if (token == null) {
@@ -336,7 +348,7 @@ public class RelayClient {
         byte[] device = decodeHex(DeviceId.get());
         SSLSocket sock = null;
         try {
-            sock = connect(host, ip, timeoutMs);
+            sock = connect(host, ip, port, timeoutMs);
             OutputStream out = sock.getOutputStream();
             out.write(buildHello(MODE_TUNNEL, token, device, targetHost));
             out.flush();

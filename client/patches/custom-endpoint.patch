@@ -15,7 +15,7 @@ index 3ce0c222..ccb5bb4e 100644
      if (connectionType == ConnectionTypeProxy) {
          setTimeout(5);
 diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
-index 4605c2fc..2ca4a0b3 100644
+index 4605c2fc..a74dcee2 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
 +++ b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
 @@ -20,6 +20,10 @@
@@ -43,7 +43,7 @@ index 4605c2fc..2ca4a0b3 100644
      currentPort = port;
 +    if (!ConnectionsManager::relayIp.empty()) {   // CUSTOM: the relay is authoritative - override whatever address tgnet picked
 +        address = ConnectionsManager::relayIp;    // (cached tgnet.dat, getConfig results, DC migration all get ignored)
-+        port = 443;
++        port = ConnectionsManager::relayPort;
 +        ipv6 = false;
 +        isIpv6 = false;
 +        currentAddress = address;
@@ -414,7 +414,7 @@ index 15ffee89..ffc89d35 100644
  
      int32_t checkSocketError(int32_t *error);
 diff --git a/TMessagesProj/jni/tgnet/ConnectionsManager.cpp b/TMessagesProj/jni/tgnet/ConnectionsManager.cpp
-index 32d590e8..49a683b2 100644
+index 32d590e8..23cd1593 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionsManager.cpp
 +++ b/TMessagesProj/jni/tgnet/ConnectionsManager.cpp
 @@ -1814,6 +1814,17 @@ uint8_t ConnectionsManager::getIpStratagy() {
@@ -426,7 +426,7 @@ index 32d590e8..49a683b2 100644
 +            for (int id = 1; id <= 5; id++) {
 +                if (datacenters.find(id) != datacenters.end()) continue;
 +                datacenter = new Datacenter(instanceNum, id);
-+                datacenter->addAddressAndPort(relayIp, (uint16_t) 443, 0, "");
++                datacenter->addAddressAndPort(relayIp, relayPort, 0, "");
 +                datacenters[id] = datacenter;
 +            }
 +            return;
@@ -435,12 +435,13 @@ index 32d590e8..49a683b2 100644
          if (datacenters.find(1) == datacenters.end()) {
              datacenter = new Datacenter(instanceNum, 1);
              datacenter->addAddressAndPort("149.154.175.50", 443, 0, "");
-@@ -3645,6 +3656,45 @@ void ConnectionsManager::applyDnsConfig(NativeByteBuffer *buffer, std::string ph
+@@ -3645,6 +3656,46 @@ void ConnectionsManager::applyDnsConfig(NativeByteBuffer *buffer, std::string ph
      });
  }
  
 +std::string ConnectionsManager::relayIp = "";
 +std::string ConnectionsManager::relaySni = "";
++uint16_t ConnectionsManager::relayPort = 443;
 +std::string ConnectionsManager::relayToken = "";
 +std::string ConnectionsManager::relayDeviceId = "";
 +std::string ConnectionsManager::relayPin = "";
@@ -481,7 +482,7 @@ index 32d590e8..49a683b2 100644
  void ConnectionsManager::init(uint32_t version, int32_t layer, int32_t apiId, std::string deviceModel, std::string systemVersion, std::string appVersion, std::string langCode, std::string systemLangCode, std::string configPath, std::string logPath, std::string regId, std::string cFingerpting, std::string installerId, std::string packageId, int32_t timezoneOffset, int64_t userId, bool userPremium, bool isPaused, bool enablePushConnection, bool hasNetwork, int32_t networkType, int32_t performanceClass) {
      currentVersion = version;
      currentLayer = layer;
-@@ -3675,6 +3725,43 @@ void ConnectionsManager::init(uint32_t version, int32_t layer, int32_t apiId, st
+@@ -3675,6 +3726,48 @@ void ConnectionsManager::init(uint32_t version, int32_t layer, int32_t apiId, st
          currentConfigPath += "/";
      }
  
@@ -508,6 +509,11 @@ index 32d590e8..49a683b2 100644
 +                    relayIp = v;
 +                } else if (k == "sni") {
 +                    relaySni = v;
++                } else if (k == "port") {
++                    int pv = atoi(v.c_str());
++                    if (pv > 0 && pv <= 65535) {
++                        relayPort = (uint16_t) pv;
++                    }
 +                } else if (k == "token") {
 +                    relayToken = v;
 +                } else if (k == "dev") {
@@ -526,15 +532,16 @@ index 32d590e8..49a683b2 100644
          LOGS_ENABLED = true;
          FileLog::getInstance().init(logPath);
 diff --git a/TMessagesProj/jni/tgnet/ConnectionsManager.h b/TMessagesProj/jni/tgnet/ConnectionsManager.h
-index d5ab4bdd..38b97248 100644
+index d5ab4bdd..7d384c8f 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionsManager.h
 +++ b/TMessagesProj/jni/tgnet/ConnectionsManager.h
-@@ -43,6 +43,13 @@ public:
+@@ -43,6 +43,14 @@ public:
      ~ConnectionsManager();
  
      static ConnectionsManager &getInstance(int32_t instanceNum);
 +    static std::string relayIp;          // CUSTOM: relay endpoint IP (from relay.cfg); empty = direct Telegram
 +    static std::string relaySni;         // CUSTOM: relay TLS SNI (hostname)
++    static uint16_t relayPort;           // CUSTOM: relay port; 443 unless a setup code pinned another (staging beside production)
 +    static std::string relayToken;       // CUSTOM: subscription token, base32 as printed by the vendor; empty = legacy v1 header
 +    static std::string relayDeviceId;    // CUSTOM: 32 hex chars identifying this install
 +    static std::string relayPin;         // CUSTOM: sha256 of the relay cert's public key, 64 hex; empty = unpinned
@@ -544,18 +551,34 @@ index d5ab4bdd..38b97248 100644
      int64_t getCurrentTimeMonotonicMillis();
      int32_t getCurrentTime();
 diff --git a/TMessagesProj/src/main/AndroidManifest.xml b/TMessagesProj/src/main/AndroidManifest.xml
-index 6f6d377d..19145a10 100644
+index 6f6d377d..83187c10 100644
 --- a/TMessagesProj/src/main/AndroidManifest.xml
 +++ b/TMessagesProj/src/main/AndroidManifest.xml
-@@ -207,6 +207,12 @@
+@@ -207,6 +207,28 @@
              <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
          </activity-alias>
  
 +        <activity
 +            android:name="org.telegram.messenger.ConfigActivity"
++            android:label="Relay Setup"
 +            android:theme="@android:style/Theme.Material.Light.NoActionBar"
 +            android:configChanges="keyboard|keyboardHidden|orientation|screenSize"
-+            android:exported="false" />
++            android:exported="true">
++            <!-- CUSTOM: a second launcher entry, so setup and renewal stay
++                 reachable after the app is configured. Being exported, this
++                 activity must treat its extras as a hint and never act
++                 destructively on one without a confirming tap. -->
++            <intent-filter>
++                <action android:name="android.intent.action.MAIN" />
++                <category android:name="android.intent.category.LAUNCHER" />
++            </intent-filter>
++            <intent-filter>
++                <action android:name="android.intent.action.VIEW" />
++                <category android:name="android.intent.category.DEFAULT" />
++                <category android:name="android.intent.category.BROWSABLE" />
++                <data android:scheme="relaycfg" />
++            </intent-filter>
++        </activity>
 +
          <activity
              android:name="org.telegram.ui.LaunchActivity"

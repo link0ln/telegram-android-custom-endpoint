@@ -44,6 +44,12 @@ public class CustomConfig {
         return prefs().getString("endpoint_ip", "");
     }
 
+    /** relay port; 443 unless a setup code pinned something else (staging) */
+    public static int getEndpointPort() {
+        int p = prefs().getInt("endpoint_port", 443);
+        return p > 0 && p <= 65535 ? p : 443;
+    }
+
     /** subscription token, base32 as printed by the vendor's CLI */
     public static String getToken() {
         return prefs().getString("token", "");
@@ -97,10 +103,12 @@ public class CustomConfig {
         return !getEndpoint().isEmpty() && !getEndpointIp().isEmpty();
     }
 
-    public static void saveEndpoint(String endpoint, String endpointIp, String token, String pin) {
+    public static void saveEndpoint(String endpoint, String endpointIp, int port,
+                                    String token, String pin) {
         prefs().edit()
                 .putString("endpoint", trim(endpoint))
                 .putString("endpoint_ip", trim(endpointIp))
+                .putInt("endpoint_port", port > 0 && port <= 65535 ? port : 443)
                 .putString("token", trim(token))
                 .putString("endpoint_pin", trim(pin))
                 .commit();   // synchronous: the process may be restarted right after
@@ -174,6 +182,7 @@ public class CustomConfig {
             sb.append("v=").append(CFG_VERSION).append('\n');
             sb.append("ip=").append(ip).append('\n');
             sb.append("sni=").append(sni).append('\n');
+            sb.append("port=").append(getEndpointPort()).append('\n');
             if (!token.isEmpty()) {
                 sb.append("token=").append(token).append('\n');
                 sb.append("dev=").append(clean(DeviceId.get())).append('\n');
@@ -189,6 +198,27 @@ public class CustomConfig {
             w.close();
         } catch (Throwable ignore) {
         }
+    }
+
+    /**
+     * Re-resolve the endpoint and store the result. Call OFF the main thread.
+     *
+     * The address is otherwise frozen at setup time, so a relay that changes IP
+     * would strand every install until its owner re-ran setup by hand. Returns
+     * true when the address changed; native only reads relay.cfg during init(),
+     * so the new address takes effect on the next process start.
+     */
+    public static boolean refreshEndpointIp() {
+        String host = getEndpoint();
+        if (host.isEmpty()) {
+            return false;
+        }
+        String fresh = resolve(host);
+        if (fresh == null || fresh.isEmpty() || fresh.equals(getEndpointIp())) {
+            return false;
+        }
+        prefs().edit().putString("endpoint_ip", fresh).commit();
+        return true;
     }
 
     private static String clean(String s) {

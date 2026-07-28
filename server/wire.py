@@ -139,37 +139,49 @@ def token_hash(raw):
 
 # ---- setup code: one string the customer types into the app ---------------
 #
-#   host|TOKEN|CK           or      host@ip|TOKEN|CK
+#   host[:port][@ip]|TOKEN|CK
 #
-# The optional @ip is an escape hatch for networks where DNS is poisoned. CK is
-# a 4-character checksum so a mistyped code fails immediately with "check the
-# code" instead of silently failing to connect, which on this product would be
-# indistinguishable from "the relay is blocked here".
+# e.g.  relay.example.com|A7K...|BMI3
+#       relay.example.com:8443@203.0.113.10|A7K...|X2QF
+#
+# The optional :port lets a staging relay live beside a production one on the
+# same certificate and hostname, and the optional @ip is an escape hatch for
+# networks where DNS is poisoned. CK is a 4-character checksum, so a mistyped
+# code fails immediately with "check the code" rather than failing to connect -
+# which on this product is indistinguishable from "the relay is blocked here".
 
-def setup_checksum(host, token_str):
-    digest = hashlib.sha256(("%s|%s" % (host, token_str)).encode("utf-8")).digest()
+DEFAULT_PORT = 443
+
+
+def setup_checksum(hostpart, token_str):
+    digest = hashlib.sha256(("%s|%s" % (hostpart, token_str)).encode("utf-8")).digest()
     return base64.b32encode(digest).decode("ascii")[:4]
 
 
-def build_setup_code(host, raw_token, ip=None):
-    hostpart = "%s@%s" % (host, ip) if ip else host
+def build_setup_code(host, raw_token, ip=None, port=None):
+    hostpart = host
+    if port and int(port) != DEFAULT_PORT:
+        hostpart = "%s:%d" % (hostpart, int(port))
+    if ip:
+        hostpart = "%s@%s" % (hostpart, ip)
     tok = token_to_str(raw_token)
     return "%s|%s|%s" % (hostpart, tok, setup_checksum(hostpart, tok))
 
 
 def parse_setup_code(text):
-    """(host, ip_or_None, raw_token). Raises ValueError with a message meant to
-    be shown to a human."""
+    """(host, port, ip_or_None, raw_token). Raises ValueError with a message
+    meant to be shown to a human."""
     parts = [p.strip() for p in (text or "").strip().split("|")]
     if len(parts) != 3:
         raise ValueError("setup code must look like host|TOKEN|CHECK")
     hostpart, tok, ck = parts
     if setup_checksum(hostpart, tok.upper()).upper() != ck.upper():
         raise ValueError("checksum mismatch - the code was mistyped")
-    host, _, ip = hostpart.partition("@")
+    rest, _, ip = hostpart.partition("@")
+    host, _, port = rest.partition(":")
     if not host:
         raise ValueError("missing host")
-    return host, (ip or None), token_from_str(tok)
+    return host, int(port) if port else DEFAULT_PORT, (ip or None), token_from_str(tok)
 
 
 def token_prefix(raw):

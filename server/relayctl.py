@@ -84,7 +84,7 @@ def cmd_issue(args, conn):
     store.audit(conn, actor(), "issue", tid,
                 json.dumps({"days": args.days, "label": args.label}))
     notify_relay(conn, args.pidfile)
-    code = wire.build_setup_code(args.host, raw, args.ip) if args.host else None
+    code = wire.build_setup_code(args.host, raw, args.ip, args.port) if args.host else None
     print("token issued  id=#%d  prefix=%s  expires=%s"
           % (tid, wire.token_prefix(raw), human_ts(expires)))
     print("")
@@ -125,7 +125,7 @@ def cmd_rotate(args, conn):
     print("")
     print("  token:      %s" % wire.token_to_str(raw))
     if args.host:
-        print("  setup code: %s" % wire.build_setup_code(args.host, raw, args.ip))
+        print("  setup code: %s" % wire.build_setup_code(args.host, raw, args.ip, args.port))
     print("")
     print("  the previous code stops working immediately.")
 
@@ -312,11 +312,13 @@ def build_parser():
     q.add_argument("--host", default=os.environ.get("RELAY_PUBLIC_HOST", ""),
                    help="relay hostname, to print a ready-to-type setup code")
     q.add_argument("--ip", default=None, help="pin an IP into the setup code")
+    q.add_argument("--port", type=int, default=int(os.environ.get("RELAY_PUBLIC_PORT", "443")),
+                   help="public port, if not 443 (lets staging sit beside production)")
     q.set_defaults(fn=cmd_issue)
 
     q = sub.add_parser("extend"); q.add_argument("token"); q.add_argument("--days", type=int, required=True); q.set_defaults(fn=cmd_extend)
     q = sub.add_parser("setexp"); q.add_argument("token"); q.add_argument("--until", required=True, help="YYYY-MM-DD"); q.set_defaults(fn=cmd_setexp)
-    q = sub.add_parser("rotate"); q.add_argument("token"); q.add_argument("--host", default=os.environ.get("RELAY_PUBLIC_HOST", "")); q.add_argument("--ip", default=None); q.set_defaults(fn=cmd_rotate)
+    q = sub.add_parser("rotate"); q.add_argument("token"); q.add_argument("--host", default=os.environ.get("RELAY_PUBLIC_HOST", "")); q.add_argument("--ip", default=None); q.add_argument("--port", type=int, default=int(os.environ.get("RELAY_PUBLIC_PORT", "443"))); q.set_defaults(fn=cmd_rotate)
     q = sub.add_parser("revoke"); q.add_argument("token"); q.add_argument("--reason", default=""); q.set_defaults(fn=cmd_revoke)
     q = sub.add_parser("suspend"); q.add_argument("token"); q.add_argument("--reason", default=""); q.set_defaults(fn=cmd_suspend)
     q = sub.add_parser("resume"); q.add_argument("token"); q.set_defaults(fn=cmd_resume)
