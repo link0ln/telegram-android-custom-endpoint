@@ -1,15 +1,24 @@
-# Server — real-TLS relay
+# Server — real-TLS relay with subscriptions
 
-A tiny stdlib-only Python relay (`mtrelay.py`) that terminates **genuine TLS** on
-`443` and forwards the custom client's MTProto stream to the real Telegram
+A stdlib-only Python relay (`mtrelay.py`) that terminates **genuine TLS** on `443`
+and forwards the custom client's MTProto stream to the real Telegram
 datacenters. On the wire the connection is indistinguishable from ordinary HTTPS
-to your domain, so pattern-based DPI (which detects Telegram's own Fake-TLS
-proxies) has nothing to match on.
+to your domain, so pattern-based DPI — which detects Telegram's own Fake-TLS
+proxies — has nothing to match on.
 
 ```
 custom client --REAL TLS(your-domain:443)--> mtrelay --> Telegram DC (1..5)
-                                                 └── other traffic --> optional cover site
+                                                 ├── onboarding tunnel --> my.telegram.org
+                                                 └── everything else   --> cover site
 ```
+
+It can run in two modes:
+
+* **Self-hosted** (default): any client that knows your domain is carried. This
+  is the original behaviour and needs no database.
+* **Subscription**: clients present a token; the relay checks expiry, device
+  count and quota, meters traffic, and stops carrying a lapsed subscription.
+  Set `ALLOW_V1=0` to refuse token-less clients.
 
 ## Requirements
 
@@ -30,8 +39,15 @@ cp /etc/letsencrypt/live/relay.example.com/fullchain.pem certs/
 cp /etc/letsencrypt/live/relay.example.com/privkey.pem   certs/
 ```
 
-(Or symlink the `live/<domain>/` directory to `./certs`. Renew as usual and
-`docker compose restart mtrelay`.)
+If you use client-side certificate pinning (see below), renew with
+`--reuse-key`, or plan a pin rotation: a new key changes the pin and every
+pinned client will refuse to connect.
+
+`SIGHUP` reloads the certificate in place, so renewal no longer needs a restart:
+
+```bash
+docker compose kill -s HUP mtrelay
+```
 
 ## 2. Run
 
@@ -40,20 +56,82 @@ docker compose up -d --build
 docker compose logs -f mtrelay
 ```
 
-You should see `mtrelay listening on 0.0.0.0:443`. When a client connects you'll
-see `PROXY dc=2 -> 149.154.167.51:443` lines.
+Logs are one JSON object per line: `listening`, then `open` / `close` / `mask` /
+`reject` per connection.
 
-## 3. Configure the client
+## 3. Issue a subscription
 
-In the app's first-run **Setup** screen enter your `api_id`, `api_hash`
-(from https://my.telegram.org) and the **endpoint host** = your domain
-(`relay.example.com`).
+`relayctl` talks to the SQLite database directly; the relay picks up changes
+within `AUTH_RELOAD_SEC`, or immediately when `relayctl` can signal it.
+
+```bash
+# inside the container so it shares /data with the relay
+docker compose exec mtrelay python3 relayctl.py \
+    issue --days 30 --devices 2 --label "alice" --host relay.example.com
+```
+
+It prints, once:
+
+```
+  token:      A7K2P9XXXXXXX-XXXXXXXXXXXXX
+  setup code: relay.example.com|A7K2P9XXXXXXX-XXXXXXXXXXXXX|BMI3
+```
+
+The **setup code** is the single string the customer types into the app. Only
+`sha256(token)` is stored, so a lost code cannot be recovered — use
+`relayctl rotate` to issue a replacement.
+
+Common operations:
+
+```bash
+relayctl list                       # active subscriptions
+relayctl show   <tok>               # one subscription, its devices and usage
+relayctl extend <tok> --days 30
+relayctl set    <tok> --devices 3 --quota 100G --period month
+relayctl suspend <tok> / resume <tok>
+relayctl revoke <tok> --reason "chargeback"
+relayctl forget-device <tok> <hex>  # free a device slot ("I got a new phone")
+relayctl usage  <tok> --days 30
+relayctl prune  --older-than 30     # delete long-revoked rows
+```
+
+`<tok>` accepts a full token, a unique prefix, or `#id`.
+
+### What a client sees when something is wrong
+
+| situation | what the relay does |
+|---|---|
+| valid subscription | carries the traffic |
+| expired / suspended / over quota / too many devices | sends a status frame the app turns into a "renew" screen |
+| **unknown or malformed token** | silently splices to the cover site, exactly like a browser or a probe |
+
+That last row is deliberate and load-bearing: a censor probing the endpoint with
+a made-up token must not be able to tell this server apart from the website it
+fronts. It also means the app cannot distinguish "bad token" from "blocked
+network", so its error text must not claim to know which.
+
+Note that `revoke` keeps the row so the customer still gets an explanation.
+`prune` deletes it, after which the token becomes unknown and is silently
+masked — the right end state, but not a good first response.
 
 ## Optional: cover site (probe resistance)
 
-Set `MASK_HOST` / `MASK_PORT` in `docker-compose.yml` to a real website you host.
-Any non-proxy connection (a browser, a DPI active probe hitting `https://your-domain/`)
-is then transparently proxied to that site, so the endpoint serves genuine content.
+Set `MASK_HOST` / `MASK_PORT` to a real website you host. Any connection that is
+not a recognised client is then transparently proxied to that site, so the
+endpoint serves genuine content to anyone who looks. **Without it those
+connections are dropped, which is itself a fingerprint** — configure it.
+
+## Optional: certificate pinning
+
+The native TLS client does not verify the relay's certificate chain. That was
+harmless while the connection carried only end-to-end encrypted MTProto, but a
+subscription token travelling in that channel is a bearer credential: without a
+pin, an on-path attacker could impersonate the relay, collect tokens and fake
+"your subscription expired" screens. The app therefore learns the SHA-256 of the
+relay certificate's public key during setup (verifying the chain properly at
+that point) and enforces it natively afterwards.
+
+Nothing is needed on the server beyond keeping the key stable (`--reuse-key`).
 
 ## Blocked hosts (host can't reach Telegram directly)
 
@@ -68,12 +146,55 @@ routes:
   ranges: `91.105.192.0/23 91.108.4.0/22 91.108.8.0/22 91.108.12.0/22
   91.108.16.0/22 91.108.20.0/22 91.108.56.0/22 95.161.64.0/20 185.76.151.0/24`).
 
+## Backups
+
+Every subscription lives in the `relay-data` volume. Recreating the container
+without it destroys all of them.
+
+```bash
+docker compose exec mtrelay python3 -c \
+  "import sqlite3;sqlite3.connect('/data/relay.db').execute(\"VACUUM INTO '/data/backup.db'\")"
+```
+
+## What the operator can see
+
+Worth being honest about, since this is a censorship-circumvention tool and the
+logs are the largest deanonymisation risk if the machine is seized:
+
+* token prefix, device id, byte counts, connection timing;
+* the client's network at `/24` (v4) or `/48` (v6) granularity by default.
+
+`LOG_IP=full` records exact addresses and is opt-in. Hashing full addresses is
+**not** a safer middle ground: the IPv4 space is small enough that a hashed log
+can be inverted by brute force in minutes. Consider an encrypted volume for
+`/data` and keep log retention short.
+
+The relay never sees who the Telegram user is — MTProto stays end-to-end
+encrypted to Telegram — so identity here is the token, not an account.
+
+## Tests
+
+```bash
+python3 -m unittest discover server/tests
+```
+
+Covers the happy path, expiry, revocation, device limits, tunnel whitelisting,
+metering, and — most importantly — that unknown tokens and plain HTTP probes get
+byte-identical cover-site treatment. No phone or Telegram account needed.
+
 ## Config reference (env)
+
+See [`.env.example`](.env.example) for the full list with comments. The ones
+that matter most:
 
 | var | default | meaning |
 |-----|---------|---------|
-| `RELAY_LISTEN_HOST` | `0.0.0.0` | bind address |
-| `RELAY_LISTEN_PORT` | `443` | bind port |
+| `RELAY_LISTEN_HOST` / `RELAY_LISTEN_PORT` | `0.0.0.0` / `443` | bind address |
 | `RELAY_CERT` / `RELAY_KEY` | `/certs/fullchain.pem` `/certs/privkey.pem` | TLS cert/key |
-| `MASK_HOST` / `MASK_PORT` | – | optional cover-site backend |
+| `RELAY_DB` | `/data/relay.db` | subscriptions (put it on a volume) |
+| `ALLOW_V1` | `1` | carry token-less clients (set `0` for a paid deployment) |
+| `MASK_HOST` / `MASK_PORT` | – | cover-site backend |
+| `RENEW_HINT` | – | shown to a customer whose subscription lapsed |
+| `DEVICE_GRACE_SEC` / `DEVICE_POLICY` | `180` / `strict` | device-slot behaviour |
+| `LOG_IP` | `prefix` | `off` \| `prefix` \| `full` |
 | `DC1`..`DC5`, `DC_PORT` | Telegram prod IPs / 443 | DC address overrides |

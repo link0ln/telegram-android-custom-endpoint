@@ -376,10 +376,17 @@ async def handle(client_reader, client_writer):
                 _close(_uw)
             cs.killer = _kill
 
-        if ver == wire.VER_V2 and mode == wire.MODE_TUNNEL:
-            ST.limits.opened(rec.id)
-            # 10-byte ack; the client's local proxy turns it into
+        if ver == wire.VER_V2:
+            if mode == wire.MODE_TUNNEL:
+                ST.limits.opened(rec.id)
+            # Every v2 connection is acknowledged with one 10-byte frame before
+            # any payload, and only once the upstream is actually up. The client
+            # withholds the socket from tgnet until it arrives: acknowledging
+            # earlier would let MTProto pour into a connection we are about to
+            # drop. On the tunnel path the client's local proxy turns this into
             # "HTTP/1.1 200 Connection established" for its WebView.
+            # OK frames carry no payload, which keeps the client's reader a
+            # fixed 10-byte read with no partial-body state to track.
             await _send_status(client_writer, wire.ST_OK, rec.ttl_days(),
                                None, close=False)
 

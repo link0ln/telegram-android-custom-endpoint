@@ -154,6 +154,19 @@ def tls_connect(port, timeout=10):
     return s
 
 
+def read_ack(sock):
+    """Every v2 connection starts with a 10-byte TGS2 acknowledgement."""
+    buf = b""
+    while len(buf) < 10:
+        chunk = sock.recv(10 - len(buf))
+        if not chunk:
+            break
+        buf += chunk
+    code, ttl, plen = wire.parse_status_header(buf)
+    assert plen == 0, "an OK ack must carry no payload"
+    return code
+
+
 def recv_some(sock, n=4096):
     try:
         return sock.recv(n)
@@ -207,6 +220,7 @@ class RelayE2E(unittest.TestCase):
         before = self.h.dc_conns
         s = tls_connect(self.port)
         s.sendall(wire.build_v2_header(2, self.raw_ok, b"\x01" * 16))
+        self.assertEqual(read_ack(s), wire.ST_OK)
         s.sendall(b"payload-1")
         self.assertEqual(recv_some(s), b"ECHO:payload-1")
         s.close()
@@ -248,12 +262,14 @@ class RelayE2E(unittest.TestCase):
         for i in range(20):
             s = tls_connect(self.port)
             s.sendall(wire.build_v2_header(2, self.raw_dev, b"\xaa" * 16))
+            self.assertEqual(read_ack(s), wire.ST_OK, "socket %d rejected" % i)
             s.sendall(b"x")
             self.assertEqual(recv_some(s), b"ECHO:x", "socket %d rejected" % i)
             socks.append(s)
         # a second device still fits the limit of 2
         s2 = tls_connect(self.port)
         s2.sendall(wire.build_v2_header(2, self.raw_dev, b"\xbb" * 16))
+        self.assertEqual(read_ack(s2), wire.ST_OK)
         s2.sendall(b"y")
         self.assertEqual(recv_some(s2), b"ECHO:y")
         socks.append(s2)
@@ -329,6 +345,7 @@ class RelayE2E(unittest.TestCase):
     def test_11_traffic_is_metered(self):
         s = tls_connect(self.port)
         s.sendall(wire.build_v2_header(2, self.raw_ok, b"\x01" * 16))
+        self.assertEqual(read_ack(s), wire.ST_OK)
         s.sendall(b"z" * 5000)
         recv_some(s)
         s.close()

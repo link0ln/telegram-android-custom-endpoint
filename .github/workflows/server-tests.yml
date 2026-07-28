@@ -1,0 +1,37 @@
+name: server-tests
+
+# The relay's masking behaviour is a security property, not a nicety: if an
+# unknown token ever stops looking exactly like a stray probe, the endpoint
+# becomes identifiable by active probing. These tests are cheap and guard that.
+
+on:
+  push:
+    paths:
+      - "server/**"
+      - ".github/workflows/server-tests.yml"
+  pull_request:
+    paths:
+      - "server/**"
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check there are still no dependencies
+        run: |
+          test ! -f server/requirements.txt || { echo "the relay is meant to stay stdlib-only"; exit 1; }
+
+      - name: Compile every module
+        run: python3 -m compileall -q server
+
+      - name: Run the suite
+        working-directory: server
+        run: python3 -m unittest discover -s tests -v

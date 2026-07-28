@@ -4,6 +4,7 @@ services:
     image: mtrelay:latest
     container_name: mtrelay
     restart: unless-stopped
+    stop_grace_period: 30s
 
     # Publish the relay on public 443. The custom client connects here over real TLS.
     ports:
@@ -20,12 +21,45 @@ services:
       RELAY_LISTEN_PORT: "443"
       RELAY_CERT: "/certs/fullchain.pem"
       RELAY_KEY: "/certs/privkey.pem"
-      # Optional cover site for non-proxy traffic (browsers / DPI active probes).
-      # Point it at a real site you host so the endpoint looks like normal HTTPS.
+      RELAY_DB: "/data/relay.db"
+
+      # Cover site for everything that is not a recognised client — browsers,
+      # port scanners, DPI active probes. Point it at a real site you host:
+      # without it those connections are simply dropped, which is itself a
+      # fingerprint.
       # MASK_HOST: "127.0.0.1"
       # MASK_PORT: "80"
 
+      # ALLOW_V1=1 keeps the original token-less client working (self-hosting).
+      # A paid deployment sets it to 0 so only subscribed clients are carried.
+      ALLOW_V1: "1"
+
+      # Shown to a customer whose subscription lapsed, inside the status frame.
+      # RENEW_HINT: "https://example.com/renew"
+
+      # off | prefix | full. 'prefix' keeps a /24 (v4) or /48 (v6) — enough to
+      # triage abuse, coarse enough that a seized log does not identify anyone.
+      # Hashing full addresses is NOT a safer alternative: the IPv4 space is
+      # small enough to invert a hash by brute force.
+      LOG_IP: "prefix"
+
     volumes:
-      # Put a valid TLS certificate for YOUR domain here (fullchain.pem + privkey.pem).
-      # e.g. symlink your Let's Encrypt live/<domain>/ directory, or copy the files.
+      # A valid TLS certificate for YOUR domain (fullchain.pem + privkey.pem).
+      # e.g. symlink your Let's Encrypt live/<domain>/ directory, or copy them.
       - ./certs:/certs:ro
+      # Subscriptions. Losing this volume loses every token you ever issued.
+      - relay-data:/data
+
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  relay-data:
