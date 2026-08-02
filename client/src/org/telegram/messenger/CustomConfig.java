@@ -191,7 +191,13 @@ public class CustomConfig {
             if (!pin.isEmpty()) {
                 sb.append("pin=").append(pin).append('\n');
             }
-            sb.append("status=").append(new File(configPath, "relay.status").getAbsolutePath()).append('\n');
+            // One status file for the whole app, not one per account. The
+            // native side keeps this path in a process-global, so with several
+            // accounts whichever initialises last would win and the verdict
+            // would land in an unpredictable account directory - which also
+            // makes the documented debug path wrong. The subscription belongs
+            // to the install, not to a Telegram account.
+            sb.append("status=").append(statusFile().getAbsolutePath()).append('\n');
 
             FileWriter w = new FileWriter(f, false);
             w.write(sb.toString());
@@ -219,6 +225,11 @@ public class CustomConfig {
         }
         prefs().edit().putString("endpoint_ip", fresh).commit();
         return true;
+    }
+
+    /** Where the native layer drops the subscription verdict; app-wide. */
+    public static File statusFile() {
+        return new File(ApplicationLoader.applicationContext.getFilesDir(), "relay.status");
     }
 
     private static String clean(String s) {

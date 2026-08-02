@@ -62,7 +62,11 @@ public class RelayStatus {
         return status == ST_OK && ttlDays >= 0 && ttlDays <= 3;
     }
 
-    public static synchronized void start(String configPath) {
+    public static synchronized void start(String ignoredConfigPath) {
+        // The caller passes a per-account config path, but the verdict is a
+        // property of the install, so it lives in the app's own files dir and
+        // this is called once per account with the same result.
+        String configPath = CustomConfig.statusFile().getParent();
         read(new File(configPath, FILE));
         if (observer != null && configPath.equals(dirPath)) {
             return;
@@ -137,6 +141,28 @@ public class RelayStatus {
                 }
             } catch (Throwable ignore) {
             }
+        }
+    }
+
+    /**
+     * Record that the subscription is fine again.
+     *
+     * Called when a check against the relay succeeds. Without it the stale
+     * verdict file survives the restart that applies the new settings, the
+     * launch gate reads it, and the user is bounced straight back to the
+     * renewal screen they just came from.
+     */
+    public static synchronized void markOk(int ttl) {
+        status = ST_OK;
+        ttlDays = ttl;
+        haveRead = true;
+        CustomConfig.setSubscription(ST_OK, ttl);
+        try {
+            File f = CustomConfig.statusFile();
+            if (f.exists()) {
+                f.delete();
+            }
+        } catch (Throwable ignore) {
         }
     }
 

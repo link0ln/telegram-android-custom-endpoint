@@ -152,6 +152,9 @@ public class ConfigActivity extends Activity {
                 }
                 RelayClient.Status st = RelayClient.ping(h, resolved, p, t, 12000);
                 if (st.code == RelayClient.ST_OK) {
+                    // the relay just told us the subscription is fine, so drop
+                    // any stale verdict before the restart reads it
+                    RelayStatus.markOk(st.ttlDays);
                     accept(h, resolved, p, t, st.pin);
                     return;
                 }
