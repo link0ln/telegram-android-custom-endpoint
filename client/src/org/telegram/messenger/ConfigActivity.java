@@ -46,6 +46,7 @@ public class ConfigActivity extends Activity {
     private LocalProxy proxy;
     private WebView webView;
     private boolean proxyOverrideSet;
+    private boolean harvested;
 
     // what the flow has gathered so far
     private String host = "";
@@ -127,7 +128,7 @@ public class ConfigActivity extends Activity {
                 }
                 next.setEnabled(false);
                 next.setText("Checking " + h + " ...");
-                validate(h, p, t, pinnedIp, next, status);
+                validate(h, p, t, pinnedIp, next, status, "Continue");
             }
         });
 
@@ -135,13 +136,13 @@ public class ConfigActivity extends Activity {
     }
 
     private void validate(final String h, final int p, final String t, final String pinnedIp,
-                          final Button next, final TextView status) {
+                          final Button next, final TextView status, final String label) {
         new Thread(new Runnable() {
             public void run() {
                 final String resolved = pinnedIp != null && !pinnedIp.isEmpty()
                         ? pinnedIp : CustomConfig.resolve(h);
                 if (resolved == null) {
-                    ui(next, status, "Can't look up " + h + " on this network.");
+                    ui(next, status, label, "Can't look up " + h + " on this network.");
                     return;
                 }
                 if (t.isEmpty()) {
@@ -154,7 +155,7 @@ public class ConfigActivity extends Activity {
                     accept(h, resolved, p, t, st.pin);
                     return;
                 }
-                ui(next, status, describe(st.code));
+                ui(next, status, label, describe(st.code));
             }
         }).start();
     }
@@ -169,16 +170,23 @@ public class ConfigActivity extends Activity {
         CustomConfig.saveEndpoint(h, resolvedIp, p, t, newPin);
         runOnUiThread(new Runnable() {
             public void run() {
-                showApiStep();
+                if (CustomConfig.isConfigured()) {
+                    // Renewal, or a re-run of setup by someone who already has
+                    // their keys: there is nothing left to ask, so apply it.
+                    restartApp();
+                } else {
+                    showApiStep();
+                }
             }
         });
     }
 
-    private void ui(final Button next, final TextView status, final String message) {
+    private void ui(final Button next, final TextView status,
+                    final String label, final String message) {
         runOnUiThread(new Runnable() {
             public void run() {
                 next.setEnabled(true);
-                next.setText("Continue");
+                next.setText(label);
                 status.setText(message);
             }
         });
@@ -233,11 +241,13 @@ public class ConfigActivity extends Activity {
                 showWebViewStep();
             }
         });
-        if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
-            // Without proxy support the WebView cannot be routed through the
-            // relay, and on a network where this product is useful
-            // my.telegram.org is exactly what is blocked. Don't offer a button
-            // that leads to a blank page.
+        if (!CustomConfig.getToken().isEmpty()
+                && !WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+            // With a subscription the WebView has to go through the relay, and
+            // on a network where this product is useful my.telegram.org is
+            // exactly what is blocked. Don't offer a button that leads to a
+            // blank page. (Without a token we open the site directly, which
+            // works wherever it is reachable.)
             auto.setEnabled(false);
             auto.setText("Set up automatically (not supported here)");
         }
@@ -334,6 +344,17 @@ public class ConfigActivity extends Activity {
             }
         });
 
+        if (token.isEmpty()) {
+            // Self-hosted relay: the tunnel needs a subscription token, so
+            // there is nothing to route through. Go straight out instead of
+            // dead-ending on a proxy that cannot be built.
+            status.setText("Opening my.telegram.org directly - this relay has no "
+                    + "subscription to tunnel through, so it needs a network where "
+                    + "the site is reachable.");
+            openWebView();
+            return;
+        }
+
         proxy = new LocalProxy(host, ip, port, token);
         final int localPort = proxy.start();
         if (localPort <= 0) {
@@ -388,13 +409,21 @@ public class ConfigActivity extends Activity {
         webView.evaluateJavascript(MyTelegramExtractor.SCRIPT_PREFILL, null);
         webView.evaluateJavascript(MyTelegramExtractor.SCRIPT, new ValueCallback<String>() {
             public void onReceiveValue(String value) {
-                MyTelegramExtractor.Result r = MyTelegramExtractor.parse(value);
-                if (!r.complete()) {
+                final MyTelegramExtractor.Result r = MyTelegramExtractor.parse(value);
+                if (!r.complete() || harvested) {
                     return;
                 }
+                harvested = true;
                 CustomConfig.saveApiCredentials(r.apiId, r.apiHash);
-                stopProxy();
-                showFoundStep(r.apiId);
+                // Defer: we are inside the WebView's own JS callback, and
+                // tearing it down from there crashes. post() runs this after
+                // the callback has returned.
+                root.post(new Runnable() {
+                    public void run() {
+                        showFoundStep(r.apiId);   // detaches the WebView
+                        stopProxy();              // now safe to destroy it
+                    }
+                });
             }
         });
     }
@@ -447,7 +476,7 @@ public class ConfigActivity extends Activity {
                 }
                 check.setEnabled(false);
                 check.setText("Checking ...");
-                validate(h, p, t, pinnedIp, check, status);
+                validate(h, p, t, pinnedIp, check, status, "Check again");
             }
         });
 
@@ -478,6 +507,10 @@ public class ConfigActivity extends Activity {
             if (webView != null) {
                 webView.stopLoading();
                 CookieManager.getInstance().removeAllCookies(null);
+                ViewGroup parent = (ViewGroup) webView.getParent();
+                if (parent != null) {
+                    parent.removeView(webView);   // destroying an attached WebView crashes
+                }
                 webView.destroy();
                 webView = null;
             }

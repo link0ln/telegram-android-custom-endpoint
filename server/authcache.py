@@ -232,10 +232,9 @@ class AuthState(object):
             dev = self.devices[key] = DeviceState(mono)
         dev.live += 1
         dev.last_active = mono
-        self._bump(rec.id, "conns", 1)
+        self._bump((rec.id, device), "conns", 1)
         if mode == 0x10:
-            self._bump(rec.id, "tunnel_conns", 1)
-        self.meter.setdefault(rec.id, {})["device_id"] = device
+            self._bump((rec.id, device), "tunnel_conns", 1)
         return cs
 
     def detach(self, cs, mono=None):
@@ -254,10 +253,11 @@ class AuthState(object):
         Called both on teardown and periodically for long-lived connections,
         so a multi-gigabyte download is metered continuously."""
         if cs.pend_up or cs.pend_down:
-            self._bump(cs.token_id, "bytes_up", cs.pend_up)
-            self._bump(cs.token_id, "bytes_down", cs.pend_down)
+            key = (cs.token_id, cs.device)
+            self._bump(key, "bytes_up", cs.pend_up)
+            self._bump(key, "bytes_down", cs.pend_down)
             if cs.mode == 0x10:
-                self._bump(cs.token_id, "tunnel_bytes", cs.pend_up + cs.pend_down)
+                self._bump(key, "tunnel_bytes", cs.pend_up + cs.pend_down)
             rec = self.by_id.get(cs.token_id)
             if rec is not None:
                 rec.used_bytes += cs.pend_up + cs.pend_down
@@ -269,16 +269,19 @@ class AuthState(object):
             for cs in list(conns):
                 self.drain_conn(cs)
 
-    def _bump(self, token_id, field, n):
-        m = self.meter.setdefault(token_id, {})
+    def _bump(self, key, field, n):
+        # Keyed by (token, device), not token alone: otherwise every byte on a
+        # shared subscription is attributed to whichever device attached last,
+        # and the per-device figures an operator sees are simply wrong.
+        m = self.meter.setdefault(key, {})
         m[field] = m.get(field, 0) + n
 
     def take_meter(self):
         """Rows for store.flush_usage(); resets the accumulator."""
         self.drain_all()
         rows = []
-        for tid, m in self.meter.items():
-            row = {"token_id": tid}
+        for (tid, device), m in self.meter.items():
+            row = {"token_id": tid, "device_id": device}
             row.update(m)
             rows.append(row)
         self.meter = {}
@@ -295,7 +298,7 @@ class AuthState(object):
         if mono - last < REJECT_MEMO:
             return False
         self.reject_memo[key] = mono
-        self._bump(rec.id, "rejects", 1)
+        self._bump((rec.id, device), "rejects", 1)
         return True
 
     def note_bad_auth(self, ip, mono=None, limit=30, window=60.0):

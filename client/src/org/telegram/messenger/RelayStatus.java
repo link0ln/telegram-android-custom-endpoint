@@ -31,21 +31,30 @@ public class RelayStatus {
 
     private static FileObserver observer;
     private static String dirPath;
+    private static volatile boolean haveRead;
     private static volatile int status = ST_OK;
     private static volatile int ttlDays = -1;
     private static volatile long updatedAt;
 
     public static int getStatus() {
-        return status;
+        return haveRead ? status : CustomConfig.getSubStatus();
     }
 
     public static int getTtlDays() {
         return ttlDays;
     }
 
-    /** true when the relay refused us for a reason the user can act on */
+    /**
+     * True when the relay refused us for a reason the user can act on.
+     *
+     * Falls back to the last verdict persisted in preferences, because callers
+     * may ask before the status file has been read - notably the launch gate,
+     * which runs before the network layer is up. Without that fallback an
+     * expired subscription would show as "connecting..." forever instead of the
+     * renewal screen.
+     */
     public static boolean isBlocking() {
-        return status != ST_OK;
+        return getStatus() != ST_OK;
     }
 
     /** true when the subscription is close enough to warrant a nudge */
@@ -57,6 +66,15 @@ public class RelayStatus {
         read(new File(configPath, FILE));
         if (observer != null && configPath.equals(dirPath)) {
             return;
+        }
+        if (observer != null) {
+            // called once per account; without this each extra account leaves
+            // its predecessor watching a directory nobody writes to any more
+            try {
+                observer.stopWatching();
+            } catch (Throwable ignore) {
+            }
+            observer = null;
         }
         dirPath = configPath;
         try {
@@ -109,6 +127,7 @@ public class RelayStatus {
                 } catch (NumberFormatException ignore) {
                 }
             }
+            haveRead = true;
             CustomConfig.setSubscription(status, ttlDays);
         } catch (Throwable ignore) {
         } finally {
@@ -121,6 +140,15 @@ public class RelayStatus {
         }
     }
 
+    /**
+     * Best-effort: raise the renewal screen as soon as the verdict lands.
+     *
+     * Android 10 and later refuse activity starts from the background, so this
+     * only works while the app is in the foreground. The reliable path is the
+     * launch gate, which checks {@link #isBlocking()} on the next start - this
+     * is here so a subscription that lapses mid-session says so immediately
+     * instead of turning into a silent "connecting...".
+     */
     private static void openRenewal() {
         try {
             Context ctx = ApplicationLoader.applicationContext;

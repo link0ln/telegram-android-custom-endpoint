@@ -15,7 +15,7 @@ index 3ce0c222..ccb5bb4e 100644
      if (connectionType == ConnectionTypeProxy) {
          setTimeout(5);
 diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
-index 4605c2fc..a74dcee2 100644
+index 4605c2fc..035e02aa 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
 +++ b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
 @@ -20,6 +20,10 @@
@@ -37,7 +37,7 @@ index 4605c2fc..a74dcee2 100644
  }
  
  void ConnectionSocket::openConnection(std::string address, uint16_t port, std::string secret, bool ipv6, int32_t networkType) {
-@@ -477,6 +482,16 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
+@@ -477,6 +482,18 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
      isIpv6 = ipv6;
      currentAddress = address;
      currentPort = port;
@@ -51,10 +51,12 @@ index 4605c2fc..a74dcee2 100644
 +    }
 +    useRealTls = !ConnectionsManager::relayIp.empty();   // CUSTOM: genuine TLS whenever a relay endpoint is configured
 +    realTlsConnected = false;
++    relayHelloState = 0;   // CUSTOM: this object is reused across reconnects - stale
++    relayHelloLen = 0;     // handshake state would validate the previous connection's answer
      waitingForHostResolve = "";
      adjustWriteOpAfterResolve = false;
      tlsState = 0;
-@@ -684,9 +699,287 @@ void ConnectionSocket::closeSocket(int32_t reason, int32_t error) {
+@@ -684,9 +701,289 @@ void ConnectionSocket::closeSocket(int32_t reason, int32_t error) {
          tlsBuffer->reuse();
          tlsBuffer = nullptr;
      }
@@ -204,6 +206,8 @@ index 4605c2fc..a74dcee2 100644
 +        sslWbio = nullptr;
 +    }
 +    realTlsConnected = false;
++    relayHelloState = 0;   // CUSTOM: never let handshake state outlive its connection
++    relayHelloLen = 0;
 +}
 +
 +void ConnectionSocket::realTlsFlushOut() {
@@ -342,7 +346,7 @@ index 4605c2fc..a74dcee2 100644
  void ConnectionSocket::onEvent(uint32_t events) {
      if (events & EPOLLIN) {
          int32_t error;
-@@ -712,6 +1005,10 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -712,6 +1009,10 @@ void ConnectionSocket::onEvent(uint32_t events) {
                  if (readCount > 0) {
                      buffer->limit((uint32_t) readCount);
                      lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
@@ -353,7 +357,7 @@ index 4605c2fc..a74dcee2 100644
                      if (proxyAuthState == 11) {
                          if (LOGS_ENABLED) DEBUG_D("connection(%p) TLS received %d", this, (int) readCount);
                          size_t newBytesRead = bytesRead + readCount;
-@@ -996,6 +1293,13 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -996,6 +1297,13 @@ void ConnectionSocket::onEvent(uint32_t events) {
                      }
                  }
              } else {
@@ -367,7 +371,7 @@ index 4605c2fc..a74dcee2 100644
                  if (!onConnectedSent) {
                      lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
                      if (LOGS_ENABLED) DEBUG_D("connection(%p) reset last event time, on connect", this);
-@@ -1010,7 +1314,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -1010,7 +1318,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
                  uint32_t remaining = buffer->remaining();
                  if (remaining) {
                      ssize_t sentLength;
@@ -584,14 +588,15 @@ index 6f6d377d..83187c10 100644
              android:name="org.telegram.ui.LaunchActivity"
              android:theme="@style/Theme.TMessages.Start"
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
-index aa7f5ed8..59acda0f 100644
+index aa7f5ed8..40124ad1 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
-@@ -436,6 +436,11 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
+@@ -436,6 +436,12 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
          flagSecureReason.attach();
  
          super.onCreate(savedInstanceState);
-+        if (!org.telegram.messenger.CustomConfig.isConfigured()) {
++        if (!org.telegram.messenger.CustomConfig.isConfigured()
++                || org.telegram.messenger.RelayStatus.isBlocking()) {
 +            startActivity(new android.content.Intent(this, org.telegram.messenger.ConfigActivity.class));
 +            finish();
 +            return;

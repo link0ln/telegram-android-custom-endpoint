@@ -11,6 +11,7 @@ Most commands take <tok>, which accepts a full token, a unique prefix, or #id.
 """
 
 import argparse
+import calendar
 import json
 import os
 import signal
@@ -107,7 +108,7 @@ def cmd_extend(args, conn):
 
 def cmd_setexp(args, conn):
     row = store.find(conn, args.token)
-    ts = int(time.mktime(time.strptime(args.until, "%Y-%m-%d")))
+    ts = calendar.timegm(time.strptime(args.until, "%Y-%m-%d"))   # UTC, like every other date here
     store.update_token(conn, row["id"], expires_at=ts)
     store.audit(conn, actor(), "setexp", row["id"], args.until)
     notify_relay(conn, args.pidfile)
@@ -248,15 +249,25 @@ def cmd_usage(args, conn):
 def cmd_devices(args, conn):
     row = store.find(conn, args.token)
     for d in store.list_devices(conn, row["id"]):
-        print("%-16s first %s  last %s  conns %d  %s"
-              % (d["device_id"].hex()[:16], human_ts(d["first_seen"]),
+        # full id, because that is what forget-device takes
+        print("%s  first %s  last %s  conns %d  %s"
+              % (d["device_id"].hex(), human_ts(d["first_seen"]),
                  human_ts(d["last_seen"]), d["conns"],
                  human_bytes(d["bytes_up"] + d["bytes_down"])))
 
 
 def cmd_forget_device(args, conn):
     row = store.find(conn, args.token)
-    n = store.forget_device(conn, row["id"], bytes.fromhex(args.device))
+    want = args.device.strip().lower()
+    matches = [d for d in store.list_devices(conn, row["id"])
+               if d["device_id"].hex().startswith(want)]
+    if not matches:
+        print("no device on #%d starts with %r" % (row["id"], want))
+        return
+    if len(matches) > 1:
+        print("%r matches %d devices - use more characters" % (want, len(matches)))
+        return
+    n = store.forget_device(conn, row["id"], matches[0]["device_id"])
     store.audit(conn, actor(), "forget-device", row["id"], args.device)
     notify_relay(conn, args.pidfile)
     print("removed %d device row(s)" % n)
