@@ -16,6 +16,16 @@ on:
         description: "Publish a GitHub Release with the APK"
         type: boolean
         default: false
+      release_tag:
+        description: "Tag to publish under when do_release is set (ignored on tag pushes)"
+        type: string
+        required: false
+        default: ""
+      release_name:
+        description: "Human title for that release"
+        type: string
+        required: false
+        default: ""
   workflow_dispatch:
     inputs:
       all_abis:
@@ -72,6 +82,23 @@ jobs:
           git remote add origin https://github.com/DrKLO/Telegram.git
           git -c protocol.version=2 fetch --depth 1 origin "${{ steps.ref.outputs.ref }}"
           git checkout --detach FETCH_HEAD
+          # Upstream moved libvpx, dav1d and ffmpeg out of the tree and into
+          # submodules (DrKLO commit c4be29c1, ~390k lines deleted). Without
+          # this those directories are simply empty, and the build does not
+          # fail loudly - it produces an APK several megabytes short of a real
+          # one. A shallow submodule fetch only reaches branch tips, so fall
+          # back to a full one when the pinned commit is older than that.
+          if [ -f .gitmodules ]; then
+            git submodule update --init --recursive --depth 1 \
+              || git submodule update --init --recursive
+            for d in libvpx dav1d ffmpeg; do
+              p="TMessagesProj/jni/third_party/$d"
+              if [ -d "$p" ] && [ -z "$(ls -A "$p")" ]; then
+                echo "error: submodule $d is still empty after init" >&2
+                exit 1
+              fi
+            done
+          fi
 
       - name: Apply custom-endpoint patch
         run: bash custom/client/apply.sh "$PWD/Telegram"
@@ -149,6 +176,14 @@ jobs:
         if: ${{ startsWith(github.ref, 'refs/tags/') || inputs.do_release }}
         uses: softprops/action-gh-release@v2
         with:
+          # On a tag push the action uses the pushed tag. When the watcher calls
+          # us it supplies its own tag, so an upstream change lands somewhere
+          # downloadable instead of only in a run artifact that expires.
+          tag_name: ${{ inputs.release_tag }}
+          name: ${{ inputs.release_name }}
+          # Automated builds are prereleases: they are visible and downloadable
+          # but do not displace the curated v* release as "Latest".
+          prerelease: ${{ inputs.do_release && !startsWith(github.ref, 'refs/tags/') }}
           files: |
             tg-custom-endpoint.apk
             tg-custom-endpoint.apk.sha256
