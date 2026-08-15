@@ -42,7 +42,16 @@ jobs:
           gh api "repos/DrKLO/Telegram/commits/master" > head.json
           HEAD_SHA=$(jq -r '.sha' head.json)
           HEAD_MSG=$(jq -r '.commit.message' head.json | head -1)
+          # HEAD is often something like "Update README.md", so for a label
+          # fall back to the most recent real version bump behind it. Without
+          # this every automated release would just be called "master".
           VER=$(printf '%s' "$HEAD_MSG" | grep -oE 'update to [0-9.]+' | awk '{print $3}' || true)
+          if [ -z "$VER" ]; then
+            gh api "repos/DrKLO/Telegram/commits?sha=master&per_page=40" > recent.json
+            VER=$(jq -r 'first(.[] | (.commit.message | split("\n")[0])
+                         | select(test("^update to [0-9.]+"; "i"))
+                         | capture("update to (?<v>[0-9.]+)").v)' recent.json 2>/dev/null || true)
+          fi
           [ -n "$VER" ] || VER="master"
           echo "pinned : ${PIN_SHA:0:10}"
           echo "master : ${HEAD_SHA:0:10}  ($HEAD_MSG)"
@@ -65,11 +74,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          MARK="upstream-${{ steps.scan.outputs.short }}"
-          CNT=$(gh issue list --repo "${{ github.repository }}" --state all \
-                  --search "$MARK in:title" --json number --jq 'length')
-          echo "existing issues for $MARK: $CNT"
-          if [ "$CNT" -gt 0 ]; then echo "dupe=true" >> "$GITHUB_OUTPUT"; else echo "dupe=false" >> "$GITHUB_OUTPUT"; fi
+          # Dedupe on the *release*, not on a tracking issue. Keyed on the
+          # issue, a build that failed - or silently produced a broken APK -
+          # would never be retried, because the issue recording the attempt is
+          # itself what suppresses the next one. Keyed on the release, a run
+          # that did not manage to publish is simply tried again tomorrow.
+          TAG="auto-${{ steps.scan.outputs.version }}-${{ steps.scan.outputs.short }}"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "release $TAG already exists"
+            echo "dupe=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no release $TAG yet"
+            echo "dupe=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Dry-run patch against master HEAD
         id: check
@@ -90,12 +107,21 @@ jobs:
             echo "---- patch does NOT apply ----"; cat reject.txt || true
           fi
 
-      - name: Open tracking issue
-        if: steps.scan.outputs.new == 'true' && steps.dedupe.outputs.dupe == 'false'
+      # Only when there is something for a human to do. When the patch applies
+      # the release is the notification; opening an issue as well was just
+      # noise, and with release-based dedupe it would now recur daily.
+      - name: Open tracking issue (patch needs a rebase)
+        if: steps.scan.outputs.new == 'true' && steps.dedupe.outputs.dupe == 'false' && steps.check.outputs.applies == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          MARK="upstream-${{ steps.scan.outputs.short }}"
+          if [ "$(gh issue list --repo "${{ github.repository }}" --state all \
+                    --search "$MARK in:title" --json number --jq 'length')" -gt 0 ]; then
+            echo "already reported"
+            exit 0
+          fi
           V="${{ steps.scan.outputs.version }}"
           SHORT="${{ steps.scan.outputs.short }}"
           REF="${{ steps.scan.outputs.ref }}"
@@ -137,4 +163,11 @@ jobs:
     with:
       tg_ref: ${{ needs.detect.outputs.ref }}
       all_abis: false
-      do_release: false
+      # Publish it. A run artifact is invisible in the Actions list (a reusable
+      # workflow shows up as a job inside this run, not as its own entry) and
+      # expires after 90 days, so "we build every upstream change" ended up
+      # looking like nothing ever happened. The tag is distinct from the
+      # curated v* ones and the release is marked as a prerelease.
+      do_release: true
+      release_tag: auto-${{ needs.detect.outputs.version }}-${{ needs.detect.outputs.short }}
+      release_name: Upstream ${{ needs.detect.outputs.version }} (${{ needs.detect.outputs.short }}) — automatic build
