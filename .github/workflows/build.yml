@@ -41,7 +41,7 @@ permissions:
 
 env:
   # DrKLO/Telegram commit to build against; patch verified to apply cleanly here
-  TG_COMMIT: 9bcf3d2769c6d3f07105a992e5d9493e33ac3348   # 12.9.0 (6966)
+  TG_COMMIT: b7561f0c641b521df0000bda2704664d792d6a1a   # 12.9.2 (6991)
 
 jobs:
   build:
