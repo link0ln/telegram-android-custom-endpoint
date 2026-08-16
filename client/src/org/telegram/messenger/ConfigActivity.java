@@ -77,8 +77,12 @@ public class ConfigActivity extends Activity {
             showRenewal();
         } else if (STEP_API.equals(step) || (CustomConfig.hasEndpoint() && !CustomConfig.isConfigured())) {
             showApiStep();
-        } else {
+        } else if (STEP_CODE.equals(step) || !CustomConfig.isConfigured()) {
             showCodeStep();
+        } else {
+            // Already set up. Opening the launcher icon used to drop straight
+            // into an empty setup form, which reads as "my settings are gone".
+            showConfigured();
         }
     }
 
@@ -445,6 +449,48 @@ public class ConfigActivity extends Activity {
         footer();
     }
 
+    // --------------------------------------------------------- configured ---
+
+    /** What the launcher icon shows once everything is set up. */
+    private void showConfigured() {
+        root.removeAllViews();
+        title("Relay");
+        body(RelayStatus.describe());
+
+        String tok = CustomConfig.getToken();
+        note("endpoint   " + host + (port != 443 ? ":" + port : "")
+                + "\naddress    " + ip
+                + "\nsubscription  " + (tok.isEmpty()
+                        ? "none (self-hosted relay)"
+                        : tok.substring(0, Math.min(6, tok.length())) + "…")
+                + "\napi_id     " + CustomConfig.getApiId()
+                + "\npinned     " + (CustomConfig.getEndpointPin().isEmpty() ? "no" : "yes"));
+
+        Button open = button("Open Telegram");
+        open.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                startActivity(new Intent(ConfigActivity.this, org.telegram.ui.LaunchActivity.class));
+                finish();
+            }
+        });
+
+        Button code = button("Enter a different setup code");
+        code.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                showCodeStep();
+            }
+        });
+
+        Button keys = button("Change api_id / api_hash");
+        keys.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                showManualApiStep();
+            }
+        });
+
+        footer();
+    }
+
     // ----------------------------------------------------------- renewal ----
 
     private void showRenewal() {
@@ -545,12 +591,16 @@ public class ConfigActivity extends Activity {
     private void restartApp() {
         // Native reads relay.cfg once, in init(), so settings only take effect
         // in a fresh process.
+        //
+        // Start Telegram explicitly rather than via getLaunchIntentForPackage():
+        // this activity has its own launcher icon, so the package has two
+        // LAUNCHER entries and that call becomes ambiguous - it resolves to the
+        // system chooser, and in practice came back here. Saving then looked
+        // like the setup screen simply reappearing.
         try {
-            Intent i = getPackageManager().getLaunchIntentForPackage(getPackageName());
-            if (i != null) {
-                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-                startActivity(i);
-            }
+            Intent i = new Intent(this, org.telegram.ui.LaunchActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+            startActivity(i);
         } catch (Throwable ignore) {
         }
         Runtime.getRuntime().exit(0);
