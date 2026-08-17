@@ -387,7 +387,12 @@ public class ConfigActivity extends Activity {
                 + "message arrives as soon as any of your clients connects, so it is "
                 + "fine to fetch it in a minute.");
 
-        final EditText codeEdit = edit("code", InputType.TYPE_CLASS_NUMBER);
+        // my.telegram.org's code is alphanumeric, not a PIN: a number keypad
+        // simply cannot type it. No suggestions or autocapitalisation either,
+        // since the keyboard would happily "correct" a random string.
+        final EditText codeEdit = edit("code", InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
         final TextView status = note("");
 
         final Button next = button("Continue");
