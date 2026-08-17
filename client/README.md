@@ -10,8 +10,10 @@ endpoints are baked in.
 
 * Adds a **Setup flow** (`ConfigActivity`), reachable at first launch and
   afterwards from its own **"Relay Setup"** launcher icon:
-  1. a setup code (`host[:port][@ip]|TOKEN|CHECK`) or just an endpoint host for
-     a self-hosted relay — validated against the relay before anything is saved;
+  1. one field taking either a setup code (`host[:port][@ip]|TOKEN|CHECK`) or,
+     for a self-hosted relay, just an endpoint host — the code already carries
+     the host, so which one you pasted is detected rather than asked;
+     validated against the relay before anything is saved;
   2. the user's own `api_id` / `api_hash`, either entered by hand or read
      automatically from my.telegram.org in an in-app WebView tunnelled through
      the relay;

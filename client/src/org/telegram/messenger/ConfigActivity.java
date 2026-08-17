@@ -23,6 +23,8 @@ import androidx.webkit.ProxyConfig;
 import androidx.webkit.ProxyController;
 import androidx.webkit.WebViewFeature;
 
+import java.util.Locale;
+
 /**
  * Setup and renewal, as a few swapped views inside one Activity.
  *
@@ -98,24 +100,31 @@ public class ConfigActivity extends Activity {
         root.removeAllViews();
         title("Set up");
         body("Paste the setup code you were given.\n\n"
-                + "Running your own relay? Leave the code empty and enter just the "
-                + "endpoint host.");
+                + "Running your own relay instead? Type its host and nothing else.");
 
-        final EditText codeEdit = edit("setup code (host|TOKEN|CHECK)", InputType.TYPE_CLASS_TEXT);
-        final EditText hostEdit = edit("or endpoint host (relay.example.com)", InputType.TYPE_CLASS_TEXT);
-        hostEdit.setText(host);
+        // One field, not two. The setup code already carries the host, so a
+        // separate host box next to it was dead weight for anyone with a code -
+        // and worse, the pair read as one two-part form, inviting people to
+        // split the code across them.
+        final EditText codeEdit = edit("setup code, or your own relay host", InputType.TYPE_CLASS_TEXT);
+        if (token.isEmpty()) {
+            codeEdit.setText(host);
+        }
         final TextView status = note("");
 
         final Button next = button("Continue");
         next.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
-                String code = codeEdit.getText().toString().trim();
-                String typedHost = hostEdit.getText().toString().trim();
+                String in = codeEdit.getText().toString().trim();
                 String h, t = "";
                 int p = 443;
                 String pinnedIp = null;
-                if (!code.isEmpty()) {
-                    RelayClient.SetupCode sc = RelayClient.parseSetupCode(code);
+                if (in.isEmpty()) {
+                    status.setText("Paste your setup code, or the host of your own relay.");
+                    return;
+                }
+                if (in.indexOf('|') >= 0) {
+                    RelayClient.SetupCode sc = RelayClient.parseSetupCode(in);
                     if (sc == null) {
                         status.setText("That code doesn't look right - check for a missing character.");
                         return;
@@ -124,11 +133,26 @@ public class ConfigActivity extends Activity {
                     t = sc.token;
                     p = sc.port;
                     pinnedIp = sc.ip;
-                } else if (!typedHost.isEmpty()) {
-                    h = typedHost;
-                } else {
-                    status.setText("Enter a setup code, or an endpoint host.");
+                } else if (looksLikeBareToken(in)) {
+                    // A token on its own has no host to connect to, and telling
+                    // someone "can't look up LUQ6RC... on this network" would be
+                    // a baffling way to say so.
+                    status.setText("That is only the token. Paste the whole setup code, "
+                            + "including the host and the check letters.");
                     return;
+                } else {
+                    h = in;
+                    int colon = h.lastIndexOf(':');
+                    if (colon > 0) {
+                        try {
+                            int typed = Integer.parseInt(h.substring(colon + 1));
+                            if (typed > 0 && typed <= 65535) {
+                                p = typed;
+                                h = h.substring(0, colon);
+                            }
+                        } catch (NumberFormatException ignore) {
+                        }
+                    }
                 }
                 next.setEnabled(false);
                 next.setText("Checking " + h + " ...");
@@ -137,6 +161,27 @@ public class ConfigActivity extends Activity {
         });
 
         footer();
+    }
+
+    /**
+     * Is this the token half of a setup code, pasted without its host?
+     * 16 random bytes in base32 is 26 characters; we print it with a dash in
+     * the middle and accept the digits the decoder repairs (0/1/8).
+     */
+    private static boolean looksLikeBareToken(String s) {
+        String t = s.replace("-", "").replace(" ", "").toUpperCase(Locale.US);
+        if (t.length() != 26) {
+            return false;
+        }
+        for (int i = 0; i < t.length(); i++) {
+            char c = t.charAt(i);
+            boolean ok = (c >= 'A' && c <= 'Z') || (c >= '2' && c <= '7')
+                    || c == '0' || c == '1' || c == '8';
+            if (!ok) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void validate(final String h, final int p, final String t, final String pinnedIp,
