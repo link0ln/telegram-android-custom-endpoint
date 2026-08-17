@@ -290,19 +290,9 @@ public class ConfigActivity extends Activity {
         Button auto = button("Set up automatically");
         auto.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
-                showWebViewStep();
+                showPhoneStep();
             }
         });
-        if (!CustomConfig.getToken().isEmpty()
-                && !WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
-            // With a subscription the WebView has to go through the relay, and
-            // on a network where this product is useful my.telegram.org is
-            // exactly what is blocked. Don't offer a button that leads to a
-            // blank page. (Without a token we open the site directly, which
-            // works wherever it is reachable.)
-            auto.setEnabled(false);
-            auto.setText("Set up automatically (not supported here)");
-        }
 
         Button manual = button("I already have api_id and api_hash");
         manual.setOnClickListener(new View.OnClickListener() {
@@ -319,6 +309,152 @@ public class ConfigActivity extends Activity {
         });
 
         footer();
+    }
+
+    // --------------------------------------------- automatic: no WebView ----
+
+    /**
+     * Ask for the number my.telegram.org should log in with. The requests go
+     * out as plain HTTP through the relay tunnel, so this screen and the next
+     * are the entire "automatic" path - no browser involved.
+     */
+    private void showPhoneStep() {
+        root.removeAllViews();
+        title("Create your keys");
+        body("Enter the phone number of your Telegram account. We will sign in to "
+                + "my.telegram.org through your relay and take the api_id and "
+                + "api_hash it issues for you.\n\n"
+                + "my.telegram.org sends its code as a Telegram message, never as an "
+                + "SMS. You need Telegram reachable somewhere else - another phone, a "
+                + "desktop, or web.telegram.org - to read that one message.");
+
+        final EditText phoneEdit = edit("+7 900 000 00 00", InputType.TYPE_CLASS_PHONE);
+        final TextView status = note("");
+
+        final Button next = button("Send code");
+        next.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                final String phone = phoneEdit.getText().toString().trim();
+                if (phone.replaceAll("[^0-9]", "").length() < 7) {
+                    status.setText("Enter the number in international format.");
+                    return;
+                }
+                next.setEnabled(false);
+                next.setText("Sending ...");
+                new Thread(new Runnable() {
+                    public void run() {
+                        final MyTelegramApi.Result r = MyTelegramApi.sendCode(
+                                MyTelegramApi.Endpoint.fromConfig(), phone);
+                        runOnUiThread(new Runnable() {
+                            public void run() {
+                                if (r.ok) {
+                                    showMtCodeStep(phone, r.randomHash);
+                                } else {
+                                    next.setEnabled(true);
+                                    next.setText("Send code");
+                                    status.setText(r.error);
+                                }
+                            }
+                        });
+                    }
+                }).start();
+            }
+        });
+
+        Button manual = button("I already have api_id and api_hash");
+        manual.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                showManualApiStep();
+            }
+        });
+
+        Button stuck = button("I can't receive that code");
+        stuck.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                showStuckStep();
+            }
+        });
+
+        footer();
+    }
+
+    /** Second screen: the my.telegram.org code, then keys, then restart. */
+    private void showMtCodeStep(final String phone, final String randomHash) {
+        root.removeAllViews();
+        title("Confirmation code");
+        body("my.telegram.org sent a code to " + phone + " as a Telegram message.\n\n"
+                + "Open Telegram wherever it still works and read it there. The "
+                + "message arrives as soon as any of your clients connects, so it is "
+                + "fine to fetch it in a minute.");
+
+        final EditText codeEdit = edit("code", InputType.TYPE_CLASS_NUMBER);
+        final TextView status = note("");
+
+        final Button next = button("Continue");
+        next.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                final String code = codeEdit.getText().toString().trim();
+                if (code.isEmpty()) {
+                    status.setText("Enter the code from that message.");
+                    return;
+                }
+                next.setEnabled(false);
+                next.setText("Signing in ...");
+                new Thread(new Runnable() {
+                    public void run() {
+                        final MyTelegramApi.Result r = MyTelegramApi.finishLogin(
+                                MyTelegramApi.Endpoint.fromConfig(), phone, randomHash,
+                                code, appTitle(), appShortName());
+                        runOnUiThread(new Runnable() {
+                            public void run() {
+                                if (r.ok && r.apiId != 0 && r.apiHash.length() == 32) {
+                                    CustomConfig.saveApiCredentials(r.apiId, r.apiHash);
+                                    finishSetup();
+                                    return;
+                                }
+                                next.setEnabled(true);
+                                next.setText("Continue");
+                                status.setText(r.error.isEmpty()
+                                        ? "Couldn't read the keys off my.telegram.org."
+                                        : r.error);
+                            }
+                        });
+                    }
+                }).start();
+            }
+        });
+
+        Button again = button("Send the code again");
+        again.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                showPhoneStep();
+            }
+        });
+
+        Button manual = button("Enter api_id / api_hash manually");
+        manual.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                showManualApiStep();
+            }
+        });
+
+        footer();
+    }
+
+    /**
+     * Telegram allows one application per account and shows its title in the
+     * account's own session list, so keep it plain and stable rather than
+     * naming this build.
+     */
+    private String appTitle() {
+        return "Telegram Android";
+    }
+
+    private String appShortName() {
+        // 5-32 chars, letters and digits only.
+        String d = DeviceId.get();
+        String tail = d != null && d.length() >= 6 ? d.substring(0, 6) : "client";
+        return "tgclient" + tail;
     }
 
     private void showStuckStep() {
@@ -378,6 +514,19 @@ public class ConfigActivity extends Activity {
                 showApiStep();
             }
         });
+
+        // Last resort. The direct requests do the same job without a browser,
+        // but if my.telegram.org changes its forms this still lets someone
+        // through by hand, on the same tunnel.
+        if (!CustomConfig.getToken().isEmpty()
+                && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+            Button web = button("Open my.telegram.org in the app");
+            web.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    showWebViewStep();
+                }
+            });
+        }
         footer();
     }
 
