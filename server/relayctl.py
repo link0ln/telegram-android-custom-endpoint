@@ -20,6 +20,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import adminui
 import store
 import wire
 
@@ -289,6 +290,20 @@ def cmd_audit(args, conn):
                  ("#%d" % r["token_id"]) if r["token_id"] else "-", r["detail"]))
 
 
+def cmd_adminurl(args, conn):
+    if args.rotate:
+        adminui.rotate_path(conn)
+        store.audit(conn, actor(), "admin-rotate", None, "")
+        notify_relay(conn, args.pidfile)
+    path = adminui.get_path(conn)
+    print(adminui.public_url(args.host, args.port, path))
+    print("")
+    print("  ^ this URL is the only credential. Anyone holding it can issue and")
+    print("    revoke subscriptions. Re-run with --rotate to invalidate it.")
+    if args.rotate:
+        print("    The previous URL now falls through to the cover site.")
+
+
 def cmd_prune(args, conn):
     n = store.prune(conn, args.older_than)
     store.audit(conn, actor(), "prune", None, str(n))
@@ -351,6 +366,11 @@ def build_parser():
     q = sub.add_parser("audit"); q.add_argument("--token", default=None); q.add_argument("--limit", type=int, default=50); q.set_defaults(fn=cmd_audit)
     q = sub.add_parser("prune"); q.add_argument("--older-than", type=int, default=30); q.set_defaults(fn=cmd_prune)
     sub.add_parser("reload").set_defaults(fn=cmd_reload)
+    q = sub.add_parser("adminurl", help="show (or rotate) the admin panel URL")
+    q.add_argument("--rotate", action="store_true")
+    q.add_argument("--host", default=os.environ.get("RELAY_PUBLIC_HOST", ""))
+    q.add_argument("--port", type=int, default=int(os.environ.get("RELAY_PUBLIC_PORT", "443")))
+    q.set_defaults(fn=cmd_adminurl)
     return p
 
 

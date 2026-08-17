@@ -37,6 +37,7 @@ try:                      # Unix only; absent on a Windows dev box
 except ImportError:
     resource = None
 
+import adminui
 import authcache
 import rlog
 import store
@@ -90,6 +91,13 @@ def load_cfg():
         5: os.environ.get("DC5", "149.154.171.5"),
     }
     c.dc_port = _env_int("DC_PORT", 443)
+    # Admin panel on an unguessable path. Off unless asked for: a deployment
+    # that does not need it should not carry the surface.
+    c.admin_ui = os.environ.get("ADMIN_UI", "0") not in ("0", "false", "no")
+    # What setup codes should tell clients to connect to, which is not
+    # necessarily what we bind to (containers, port forwards).
+    c.public_host = os.environ.get("RELAY_PUBLIC_HOST", "")
+    c.public_port = _env_int("RELAY_PUBLIC_PORT", c.port)
     return c
 
 
@@ -101,6 +109,7 @@ class Runtime(object):
         self.resolver = None
         self.conn_seq = 0
         self.local_addrs = set()
+        self.admin = None
 
     def next_id(self):
         self.conn_seq += 1
@@ -108,6 +117,52 @@ class Runtime(object):
 
 
 ST = Runtime()
+
+
+class AdminDeps(object):
+    """Everything the panel may reach back into, named explicitly.
+
+    The admin module never imports the relay and never touches ST, so the
+    blast radius of a bug in the panel is this list and nothing else.
+    """
+
+    def __init__(self, cfg, secret, loop):
+        self.public_host = cfg.public_host or ""
+        self.public_port = cfg.public_port
+        self._secret = secret
+        self._db = cfg.db
+        self._loop = loop
+
+    def secret(self):
+        return self._secret
+
+    def live_conns(self):
+        return {tid: len(s) for tid, s in ST.state.live.items() if s}
+
+    def _on_loop(self, fn, *args):
+        """Panel actions run on a worker thread, but connection teardown and
+        task scheduling belong to the event loop and nowhere else."""
+        self._loop.call_soon_threadsafe(fn, *args)
+
+    def kill(self, token_id, reason):
+        n = len(ST.state.conns_of(token_id))
+        self._on_loop(_kill_tokens, [token_id], reason)
+        return n
+
+    def reload(self):
+        # The panel writes with its own connection; this is what makes the
+        # change land in the running cache, the same way relayctl's SIGHUP does.
+        self._on_loop(lambda: asyncio.ensure_future(reload_cache(force=True)))
+
+    async def run_db(self, fn, *args):
+        def work():
+            conn = store.connect(self._db)
+            try:
+                return fn(conn, *args)
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(work)
 
 
 # ------------------------------------------------------------- transport ----
@@ -272,6 +327,22 @@ async def handle(client_reader, client_writer):
 
         ver, b4 = wire.classify_prologue(bytes(peeked[:wire.PROLOGUE_LEN]))
         if ver is None:
+            # The admin panel hangs off this exact branch on purpose. A request
+            # whose path does not match the secret falls through to the cover
+            # site having changed nothing observable, so the panel is not
+            # something a scanner can find - only something a holder of the
+            # path can reach.
+            if ST.admin is not None and adminui.looks_like_http(bytes(peeked)):
+                try:
+                    if await adminui.try_serve(client_reader, client_writer, peeked,
+                                               deadline, ST.admin, _read_into):
+                        rlog.log("admin", conn=conn_id, ip=rlog.redact(ip))
+                        await _aclose(client_writer)
+                        return
+                except Exception as exc:
+                    rlog.log("admin_error", conn=conn_id, err=repr(exc)[:200])
+                    _close(client_writer)
+                    return
             return await _mask(client_reader, client_writer, peeked, conn_id, ip)
 
         rec = None
@@ -532,6 +603,17 @@ async def serve(cfg=None, ready=None):
 
     store.init_db(cfg.db).close()
     await reload_cache(force=True)
+
+    if cfg.admin_ui:
+        conn = store.connect(cfg.db)
+        try:
+            ST.admin = AdminDeps(cfg, adminui.get_path(conn),
+                                 asyncio.get_running_loop())
+        finally:
+            conn.close()
+        # The URL is a credential, so it is never written to the journal.
+        # `relayctl adminurl` is how the operator gets it.
+        rlog.log("admin_ui", enabled=True)
 
     fds = _raise_fd_limit()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

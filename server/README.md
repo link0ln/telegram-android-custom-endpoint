@@ -128,6 +128,35 @@ not a recognised client is then transparently proxied to that site, so the
 endpoint serves genuine content to anyone who looks. **Without it those
 connections are dropped, which is itself a fingerprint** — configure it.
 
+## Optional: web admin panel
+
+`ADMIN_UI=1` serves the whole of `relayctl` — issue, extend, set, suspend,
+resume, rotate, revoke, devices, usage, audit, prune — as a web page, on a
+32-character random path:
+
+```bash
+relayctl adminurl --host relay.example.com --port 443
+```
+
+It is served by the relay itself, on the same port, deliberately: a request
+whose path does not match falls through to the **cover site**, byte for byte,
+exactly as an unknown token does. A wrong URL is not a 404 and not a login
+form — it is indistinguishable from a domain that has no panel at all, so
+there is nothing for a scanner to find. `relay.log` records it as an ordinary
+`mask` event. This is also why `MASK_HOST` is not optional if you enable the
+panel: without a cover site those requests are dropped, which *is* a signal.
+
+**The URL is the only credential.** Anyone holding it can issue and revoke
+subscriptions. It is never written to the log, the page loads no external
+resource (so it cannot leak through `Referer`), responses are `no-store` and
+`no-referrer`, and `adminurl --rotate` invalidates a leaked link — the old one
+starts masking immediately. If that threat model is too loose for you, leave
+`ADMIN_UI` off and reach `relayctl` over SSH, or bind the relay's admin to
+localhost and use `ssh -L`.
+
+Issued codes are shown exactly once, as on the CLI: the database stores only a
+SHA-256, so the panel *cannot* redisplay a token even when asked.
+
 ## Optional: certificate pinning
 
 The native TLS client does not verify the relay's certificate chain. That was
@@ -201,6 +230,8 @@ that matter most:
 | `RELAY_DB` | `/data/relay.db` | subscriptions (put it on a volume) |
 | `ALLOW_V1` | `1` | carry token-less clients (set `0` for a paid deployment) |
 | `MASK_HOST` / `MASK_PORT` | – | cover-site backend |
+| `ADMIN_UI` | `0` | serve the admin panel on a secret path |
+| `RELAY_PUBLIC_HOST` / `RELAY_PUBLIC_PORT` | – / bind port | what setup codes tell clients to dial |
 | `RENEW_HINT` | – | shown to a customer whose subscription lapsed |
 | `DEVICE_GRACE_SEC` / `DEVICE_POLICY` | `180` / `strict` | device-slot behaviour |
 | `LOG_IP` | `prefix` | `off` \| `prefix` \| `full` |
