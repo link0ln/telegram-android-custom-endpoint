@@ -190,7 +190,18 @@ jobs:
           body: |
             Custom-endpoint Telegram for Android — automated build.
 
-            Debug-signed; installs alongside the official app as
-            `org.telegram.messenger.beta`. On first launch enter your
-            `api_id`, `api_hash` (https://my.telegram.org) and your relay
-            endpoint host. Built from DrKLO/Telegram @ ${{ steps.ref.outputs.ref }}.
+            Installs alongside the official app as `org.telegram.messenger.beta`.
+            Signed with the project key when the repository has the signing
+            secrets, debug-signed otherwise — check the APK's certificate
+            digest if it matters to you.
+
+            First launch asks for one thing: the setup code your relay operator
+            gave you (`host|TOKEN|CHECK`), or just a hostname if you run your
+            own relay. It then creates the `api_id` / `api_hash` for your own
+            account by signing in to my.telegram.org through that relay, so
+            nothing has to be looked up by hand. That site sends its
+            confirmation code as a Telegram message rather than an SMS, so you
+            need Telegram reachable somewhere once; entering keys manually
+            stays available if you would rather.
+
+            Built from DrKLO/Telegram @ ${{ steps.ref.outputs.ref }}.
