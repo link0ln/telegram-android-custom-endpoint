@@ -186,7 +186,13 @@ jobs:
           # with it.
           echo "native libraries in the APK:"
           unzip -l tg-custom-endpoint.apk | awk '/\.so$/ {printf "  %-46s %s\n", $4, $1}'
-          MIN=45000000
+          # A blunt backstop, not the real defence: the submodule check above is
+          # what actually catches a missing dependency. This floor exists only
+          # for a catastrophic miss, and it is set well below any legitimate
+          # size - 12.9.2 shipped 52 MB, 12.10.1 ships 39.5 MB after upstream
+          # moved third_party out, and a 45 MB floor invented from the older
+          # number rejected two perfectly good builds.
+          MIN=30000000
           SIZE=$(unzip -l tg-custom-endpoint.apk \
                  | awk '/lib\/arm64-v8a\/libtmessages/ {print $1; exit}')
           echo "libtmessages: ${SIZE:-missing} bytes (floor $MIN)"
