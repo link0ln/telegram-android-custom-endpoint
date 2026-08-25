@@ -170,21 +170,6 @@ jobs:
           cp Telegram/TMessagesProj_App/build/outputs/apk/afat/debug/app.apk tg-custom-endpoint.apk
           sha256sum tg-custom-endpoint.apk | tee tg-custom-endpoint.apk.sha256
 
-      - name: Sanity-check the native library size
-        run: |
-          # Second line of defence behind the submodule check: a partially
-          # built libtmessages is not an error to Gradle. 12.9.2 and a good
-          # 12.10.1 both yield ~52 MB; the broken 12.10.1 build yielded 39.6.
-          # Move this floor deliberately, never to make a red build green.
-          MIN=45000000
-          SIZE=$(unzip -l tg-custom-endpoint.apk \
-                 | awk '/lib\/arm64-v8a\/libtmessages/ {print $1; exit}')
-          echo "libtmessages size: ${SIZE:-0} bytes (floor $MIN)"
-          if [ -z "$SIZE" ] || [ "$SIZE" -lt "$MIN" ]; then
-            echo "error: native library is short - a dependency did not build" >&2
-            exit 1
-          fi
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -192,6 +177,28 @@ jobs:
           path: |
             tg-custom-endpoint.apk
             tg-custom-endpoint.apk.sha256
+
+      - name: Sanity-check the native library size
+        run: |
+          # Runs after the upload on purpose: when this trips, the APK it is
+          # complaining about still has to be downloadable, or the failure
+          # cannot be diagnosed. v0.2.3 failed here and took its own evidence
+          # with it.
+          echo "native libraries in the APK:"
+          unzip -l tg-custom-endpoint.apk | awk '/\.so$/ {printf "  %-46s %s\n", $4, $1}'
+          MIN=45000000
+          SIZE=$(unzip -l tg-custom-endpoint.apk \
+                 | awk '/lib\/arm64-v8a\/libtmessages/ {print $1; exit}')
+          echo "libtmessages: ${SIZE:-missing} bytes (floor $MIN)"
+          if [ -z "$SIZE" ]; then
+            echo "error: no libtmessages in the APK at all" >&2; exit 1
+          fi
+          if [ "$SIZE" -lt "$MIN" ]; then
+            echo "error: native library is short - a dependency did not build" >&2
+            echo "if this version legitimately ships a smaller library, move the" >&2
+            echo "floor deliberately after checking the APK, never to go green" >&2
+            exit 1
+          fi
 
       - name: Publish release
         if: ${{ startsWith(github.ref, 'refs/tags/') || inputs.do_release }}
