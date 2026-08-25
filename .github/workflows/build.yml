@@ -91,13 +91,19 @@ jobs:
           if [ -f .gitmodules ]; then
             git submodule update --init --recursive --depth 1 \
               || git submodule update --init --recursive
-            for d in libvpx dav1d ffmpeg; do
-              p="TMessagesProj/jni/third_party/$d"
-              if [ -d "$p" ] && [ -z "$(ls -A "$p")" ]; then
-                echo "error: submodule $d is still empty after init" >&2
+            # Check every submodule the tree declares, never a hand-written
+            # list. 12.10.1 moved seven more libraries out (opus, openh264,
+            # libyuv, tlottie and friends) and the old three-name check waved
+            # them through: the build succeeded and shipped a native library
+            # 12.7 MB short, which is exactly what this guard exists to stop.
+            paths=$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}')
+            for p in $paths; do
+              if [ ! -d "$p" ] || [ -z "$(ls -A "$p" 2>/dev/null)" ]; then
+                echo "error: submodule $p is empty after init" >&2
                 exit 1
               fi
             done
+            echo ">> $(echo "$paths" | wc -l) submodules populated"
           fi
 
       - name: Apply custom-endpoint patch
@@ -163,6 +169,21 @@ jobs:
         run: |
           cp Telegram/TMessagesProj_App/build/outputs/apk/afat/debug/app.apk tg-custom-endpoint.apk
           sha256sum tg-custom-endpoint.apk | tee tg-custom-endpoint.apk.sha256
+
+      - name: Sanity-check the native library size
+        run: |
+          # Second line of defence behind the submodule check: a partially
+          # built libtmessages is not an error to Gradle. 12.9.2 and a good
+          # 12.10.1 both yield ~52 MB; the broken 12.10.1 build yielded 39.6.
+          # Move this floor deliberately, never to make a red build green.
+          MIN=45000000
+          SIZE=$(unzip -l tg-custom-endpoint.apk \
+                 | awk '/lib\/arm64-v8a\/libtmessages/ {print $1; exit}')
+          echo "libtmessages size: ${SIZE:-0} bytes (floor $MIN)"
+          if [ -z "$SIZE" ] || [ "$SIZE" -lt "$MIN" ]; then
+            echo "error: native library is short - a dependency did not build" >&2
+            exit 1
+          fi
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
